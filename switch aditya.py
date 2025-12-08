@@ -843,11 +843,11 @@ class SwitchRegisterGUI:
                         
                         # Apply trail rate and period extraction
                         trail_results = processed_df.apply(get_trail_rates_and_periods, axis=1, result_type='expand')
-                        trail_results.columns = [f'Trail Rate {i} year' for i in range(1, 6)] + ['Investment Period From', 'Investment Period To']
+                        trail_results.columns = [f'switch in Trail Rate {i} year' for i in range(1, 6)] + ['Investment Period From', 'Investment Period To']
                         
                         # Add trail rate columns to processed_df
                         for year in range(1, 6):
-                            col_name = f'Trail Rate {year} year'
+                            col_name = f'switch in Trail Rate {year} year'
                             processed_df[col_name] = trail_results[col_name]
                         
                         # Add Investment Period columns
@@ -855,10 +855,158 @@ class SwitchRegisterGUI:
                         processed_df['Investment Period To'] = trail_results['Investment Period To']
                         
                         # DEBUG: Print summary
-                        print(f"\n=== DEBUG: Matching Summary ===")
+                        print(f"\n=== DEBUG: Matching Summary (IN) ===")
                         print(f"Total matches: {match_count}")
                         print(f"Total no matches: {no_match_count}")
                         print(f"Total rows processed: {len(processed_df)}")
+                        
+                        # Now match with OUT subfund code for "switch out" trail rates
+                        loading_window.update_status("Matching with Brokerage Structure (OUT)...")
+                        
+                        match_count_out = 0
+                        no_match_count_out = 0
+                        
+                        def get_trail_rates_out(row):
+                            nonlocal match_count_out, no_match_count_out
+                            try:
+                                # Get broker code
+                                broker = row.get(broker_col) if broker_col in row.index else None
+                                if pd.isna(broker) or broker == '':
+                                    no_match_count_out += 1
+                                    return ['Not Found'] * 5  # 5 trail rates only
+                                
+                                broker_str = str(broker).strip().upper()
+                                
+                                # Get OUT subfund code
+                                out_subfund = row.get('out subfund code') if 'out subfund code' in row.index else None
+                                if pd.isna(out_subfund) or out_subfund == 'Not Found' or out_subfund == '':
+                                    no_match_count_out += 1
+                                    return ['Not Found'] * 5
+                                
+                                out_subfund_str = str(out_subfund).strip().upper()
+                                
+                                # Get transaction date
+                                tran_date = row.get('_TRAN_DATE_DT') if '_TRAN_DATE_DT' in row.index else None
+                                
+                                # Filter brokerage structure: match Cons Code with broker AND Scheme Code with OUT subfund code
+                                mask = (
+                                    (brokerage_normalized[cons_code_col] == broker_str) &
+                                    (brokerage_normalized[scheme_code_b_col] == out_subfund_str)
+                                )
+                                matches = brokerage_normalized[mask]
+                                
+                                if matches.empty:
+                                    no_match_count_out += 1
+                                    return ['Not Found'] * 5
+                                
+                                # Filter by date range if transaction date and period dates are available
+                                if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col:
+                                    # Check each match to see if transaction date falls within the period
+                                    date_filtered_matches = []
+                                    for idx, match_row in matches.iterrows():
+                                        period_from_dt = match_row.get('_PERIOD_FROM_DT')
+                                        period_to_dt = match_row.get('_PERIOD_TO_DT')
+                                        
+                                        # If both period dates are valid, check if transaction date is within range
+                                        if pd.notna(period_from_dt) and pd.notna(period_to_dt):
+                                            if period_from_dt <= tran_date <= period_to_dt:
+                                                date_filtered_matches.append(idx)
+                                        # If period dates are missing, include the match (no date filtering)
+                                        elif pd.isna(period_from_dt) or pd.isna(period_to_dt):
+                                            date_filtered_matches.append(idx)
+                                    
+                                    if date_filtered_matches:
+                                        # Use the first date-filtered match
+                                        matches = matches.loc[date_filtered_matches]
+                                    else:
+                                        # No matches within date range
+                                        no_match_count_out += 1
+                                        return ['Not Found'] * 5
+                                
+                                match_count_out += 1
+                                
+                                # Take first match
+                                first_match = matches.iloc[0]
+                                results = []
+                                
+                                # Get trail rates
+                                for year in range(1, 6):
+                                    if year in trail_rate_cols:
+                                        trail_col = trail_rate_cols[year]
+                                        if trail_col in first_match.index:
+                                            rate_value = first_match[trail_col]
+                                            if pd.notna(rate_value) and str(rate_value).strip() != '':
+                                                results.append(rate_value)
+                                            else:
+                                                results.append('Not Found')
+                                        else:
+                                            results.append('Not Found')
+                                    else:
+                                        results.append('Not Found')
+                                
+                                return results
+                            except Exception as e:
+                                no_match_count_out += 1
+                                return ['Not Found'] * 5
+                        
+                        # Apply trail rate extraction for OUT subfund code
+                        trail_results_out = processed_df.apply(get_trail_rates_out, axis=1, result_type='expand')
+                        trail_results_out.columns = [f'switch out Trail Rate {i} year' for i in range(1, 6)]
+                        
+                        # Add "switch out" trail rate columns to processed_df
+                        for year in range(1, 6):
+                            col_name = f'switch out Trail Rate {year} year'
+                            processed_df[col_name] = trail_results_out[col_name]
+                        
+                        # DEBUG: Print summary for OUT
+                        print(f"\n=== DEBUG: Matching Summary (OUT) ===")
+                        print(f"Total matches: {match_count_out}")
+                        print(f"Total no matches: {no_match_count_out}")
+                        
+                        # Add check columns: if switch in > switch out, show "Check"
+                        loading_window.update_status("Calculating checks...")
+                        
+                        def compare_trail_rates(value_in, value_out):
+                            """Compare two trail rate values and return 'Check' if in > out"""
+                            try:
+                                # Handle "Not Found" or empty values
+                                if pd.isna(value_in) or str(value_in).strip() == '' or str(value_in).strip().upper() == 'NOT FOUND':
+                                    return ''
+                                if pd.isna(value_out) or str(value_out).strip() == '' or str(value_out).strip().upper() == 'NOT FOUND':
+                                    return ''
+                                
+                                # Convert to numeric, handling percentage signs and other formats
+                                val_in_str = str(value_in).strip().replace('%', '').replace(',', '')
+                                val_out_str = str(value_out).strip().replace('%', '').replace(',', '')
+                                
+                                try:
+                                    val_in_num = float(val_in_str)
+                                    val_out_num = float(val_out_str)
+                                    
+                                    # If switch in > switch out, return "Check"
+                                    if val_in_num > val_out_num:
+                                        return 'Check'
+                                    else:
+                                        return ''
+                                except (ValueError, TypeError):
+                                    # If conversion fails, return empty
+                                    return ''
+                            except Exception:
+                                return ''
+                        
+                        # Add check columns for each year
+                        for year in range(1, 6):
+                            col_in = f'switch in Trail Rate {year} year'
+                            col_out = f'switch out Trail Rate {year} year'
+                            check_col = f'Check {year} year'
+                            
+                            if col_in in processed_df.columns and col_out in processed_df.columns:
+                                processed_df[check_col] = processed_df.apply(
+                                    lambda row: compare_trail_rates(row[col_in], row[col_out]),
+                                    axis=1
+                                )
+                            else:
+                                processed_df[check_col] = ''
                     else:
                         # Missing required columns
                         missing_cols = []
@@ -878,18 +1026,209 @@ class SwitchRegisterGUI:
                         ))
                         # Add empty trail rate columns
                         for year in range(1, 6):
-                            processed_df[f'Trail Rate {year} year'] = 'Not Found'
+                            processed_df[f'switch in Trail Rate {year} year'] = 'Not Found'
+                            processed_df[f'switch out Trail Rate {year} year'] = 'Not Found'
+                            processed_df[f'Check {year} year'] = ''
                         processed_df['Investment Period From'] = 'Not Found'
                         processed_df['Investment Period To'] = 'Not Found'
                 else:
                     # No brokerage structure data
                     for year in range(1, 6):
-                        processed_df[f'Trail Rate {year} year'] = 'Not Found'
+                        processed_df[f'switch in Trail Rate {year} year'] = 'Not Found'
+                        processed_df[f'switch out Trail Rate {year} year'] = 'Not Found'
+                        processed_df[f'Check {year} year'] = ''
                     processed_df['Investment Period From'] = 'Not Found'
                     processed_df['Investment Period To'] = 'Not Found'
                 
+                # Reorder columns: Group by year (switch in, switch out, check for each year)
+                loading_window.update_status("Reordering columns...")
+                
+                # Get all current columns
+                all_columns = list(processed_df.columns)
+                
+                # Find columns to reorder
+                trail_rate_columns = {}
+                check_columns = {}
+                other_columns = []
+                
+                for col in all_columns:
+                    if 'switch in Trail Rate' in col:
+                        # Extract year number
+                        year_match = None
+                        for year in range(1, 6):
+                            if f'{year} year' in col:
+                                year_match = year
+                                break
+                        if year_match:
+                            if year_match not in trail_rate_columns:
+                                trail_rate_columns[year_match] = {}
+                            trail_rate_columns[year_match]['in'] = col
+                    elif 'switch out Trail Rate' in col:
+                        # Extract year number
+                        year_match = None
+                        for year in range(1, 6):
+                            if f'{year} year' in col:
+                                year_match = year
+                                break
+                        if year_match:
+                            if year_match not in trail_rate_columns:
+                                trail_rate_columns[year_match] = {}
+                            trail_rate_columns[year_match]['out'] = col
+                    elif 'Check' in col and 'year' in col:
+                        # Extract year number
+                        year_match = None
+                        for year in range(1, 6):
+                            if f'{year} year' in col:
+                                year_match = year
+                                break
+                        if year_match:
+                            check_columns[year_match] = col
+                    else:
+                        other_columns.append(col)
+                
+                # Build new column order: group by year
+                new_column_order = []
+                
+                # Add other columns first (before trail rate columns)
+                trail_rate_start_idx = None
+                for idx, col in enumerate(all_columns):
+                    if 'switch in Trail Rate' in col or 'switch out Trail Rate' in col or ('Check' in col and 'year' in col):
+                        if trail_rate_start_idx is None:
+                            trail_rate_start_idx = idx
+                        break
+                    new_column_order.append(col)
+                
+                # Add trail rate columns grouped by year
+                for year in range(1, 6):
+                    if year in trail_rate_columns:
+                        if 'in' in trail_rate_columns[year]:
+                            new_column_order.append(trail_rate_columns[year]['in'])
+                        if 'out' in trail_rate_columns[year]:
+                            new_column_order.append(trail_rate_columns[year]['out'])
+                    if year in check_columns:
+                        new_column_order.append(check_columns[year])
+                
+                # Add remaining columns that weren't in the original order
+                for col in all_columns:
+                    if col not in new_column_order:
+                        new_column_order.append(col)
+                
+                # Reorder the dataframe
+                processed_df = processed_df[new_column_order]
+                
+                # Add check for Regular vs Direct scheme matching
+                loading_window.update_status("Checking Regular vs Direct scheme matches...")
+                
+                def check_regular_direct_match(row):
+                    """Check if switch in and switch out schemes are the same but one is Regular and other is Direct"""
+                    try:
+                        switch_in = row.get('switch in scheme') if 'switch in scheme' in row.index else None
+                        switch_out = row.get('switch out scheme') if 'switch out scheme' in row.index else None
+                        
+                        if pd.isna(switch_in) or pd.isna(switch_out):
+                            return ''
+                        
+                        switch_in_str = str(switch_in).strip()
+                        switch_out_str = str(switch_out).strip()
+                        
+                        if switch_in_str == '' or switch_out_str == '':
+                            return ''
+                        
+                        # Remove code prefix (e.g., "129B/ABSL" or any code before "/")
+                        def remove_code_prefix(scheme_str):
+                            if '/' in scheme_str:
+                                # Split by "/" and take everything after the first "/"
+                                parts = scheme_str.split('/', 1)
+                                if len(parts) > 1:
+                                    return parts[1].strip()
+                            return scheme_str
+                        
+                        scheme_in = remove_code_prefix(switch_in_str)
+                        scheme_out = remove_code_prefix(switch_out_str)
+                        
+                        # Normalize by removing plan type indicators (Regular, Direct, Reg, etc.)
+                        def normalize_scheme_name(scheme):
+                            # Remove common plan type indicators
+                            scheme_upper = scheme.upper()
+                            # Remove: Regular Growth, Reg Growth, Regular, Reg Plan, Reg, etc.
+                            scheme_upper = scheme_upper.replace('REGULAR GROWTH', '').replace('REG GROWTH', '')
+                            scheme_upper = scheme_upper.replace('REGULAR', '').replace('REG PLAN', '')
+                            scheme_upper = scheme_upper.replace('REG', '').replace('GROWTH', '')
+                            # Remove: Direct Growth, Direct, etc.
+                            scheme_upper = scheme_upper.replace('DIRECT GROWTH', '').replace('DIRECT', '')
+                            # Remove extra spaces and dashes
+                            scheme_upper = scheme_upper.replace('-', '').strip()
+                            # Remove multiple spaces
+                            while '  ' in scheme_upper:
+                                scheme_upper = scheme_upper.replace('  ', ' ')
+                            return scheme_upper.strip()
+                        
+                        normalized_in = normalize_scheme_name(scheme_in)
+                        normalized_out = normalize_scheme_name(scheme_out)
+                        
+                        # Check if normalized scheme names match
+                        if normalized_in != normalized_out:
+                            return ''
+                        
+                        # Check if one has Regular and other has Direct
+                        switch_in_upper = switch_in_str.upper()
+                        switch_out_upper = switch_out_str.upper()
+                        
+                        # Check for Regular indicators
+                        has_regular_in = any(indicator in switch_in_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
+                        has_regular_out = any(indicator in switch_out_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
+                        
+                        # Check for Direct indicators
+                        has_direct_in = 'DIRECT' in switch_in_upper
+                        has_direct_out = 'DIRECT' in switch_out_upper
+                        
+                        # If one is Regular and other is Direct, show Check
+                        if (has_regular_in and has_direct_out) or (has_direct_in and has_regular_out):
+                            return 'Check'
+                        
+                        return ''
+                    except Exception as e:
+                        return ''
+                
+                # Add the check column
+                if 'switch in scheme' in processed_df.columns and 'switch out scheme' in processed_df.columns:
+                    processed_df['Regular vs Direct Check'] = processed_df.apply(check_regular_direct_match, axis=1)
+                else:
+                    processed_df['Regular vs Direct Check'] = ''
+                
                 loading_window.update_status("Processing complete...")
                 time.sleep(0.3)
+                
+                # Remove rows where broker is "DIRECT"
+                loading_window.update_status("Filtering out DIRECT broker entries...")
+                
+                # Find broker column (it should already be found, but check again to be safe)
+                broker_col_filter = None
+                for col in processed_df.columns:
+                    col_upper = str(col).upper().strip()
+                    if 'BROK' in col_upper and ('DLR' in col_upper or 'DEALER' in col_upper):
+                        broker_col_filter = col
+                        break
+                    elif col_upper == 'BROKER' or col_upper == 'BROKER CODE' or col_upper == 'BROKER_CODE':
+                        broker_col_filter = col
+                        break
+                
+                if broker_col_filter and broker_col_filter in processed_df.columns:
+                    initial_count = len(processed_df)
+                    # Filter out rows where broker is "DIRECT" (case-insensitive)
+                    processed_df = processed_df[
+                        ~processed_df[broker_col_filter].astype(str).str.strip().str.upper().eq('DIRECT')
+                    ]
+                    removed_count = initial_count - len(processed_df)
+                    if removed_count > 0:
+                        print(f"\n=== Removed {removed_count} rows with DIRECT broker ===")
+                        self.root.after(0, lambda: messagebox.showinfo(
+                            "Filter Applied",
+                            f"Removed {removed_count} row(s) where broker is 'DIRECT'.\n"
+                            f"Remaining rows: {len(processed_df)}"
+                        ))
+                else:
+                    print("\n=== Warning: Broker column not found, skipping DIRECT filter ===")
                 
                 loading_window.update_status("Preparing to save...")
                 save_path = filedialog.asksaveasfilename(

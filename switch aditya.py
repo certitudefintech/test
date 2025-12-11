@@ -490,16 +490,23 @@ class SwitchRegisterGUI:
                 
                 loading_window.update_status("Matching scheme codes with RTA Master...")
                 
-                # Find Scheme_code and PARENT_SUB_FUND_CODE columns in RTA Master
+                # Find Scheme_code, PARENT_SUB_FUND_CODE, and ASSET_CLASS columns in RTA Master
                 scheme_code_col = None
                 parent_sub_fund_code_col = None
+                asset_class_col = None
                 
                 for col in rta_df.columns:
-                    col_upper = str(col).upper().strip()
-                    if col_upper == 'SCHEME_CODE' or col_upper == 'SCHEME CODE':
-                        scheme_code_col = col
-                    elif col_upper == 'PARENT_SUB_FUND_CODE' or col_upper == 'PARENT SUB FUND CODE':
-                        parent_sub_fund_code_col = col
+                    try:
+                        col_upper = str(col).upper().strip()
+                        if col_upper == 'SCHEME_CODE' or col_upper == 'SCHEME CODE':
+                            scheme_code_col = col
+                        elif col_upper == 'PARENT_SUB_FUND_CODE' or col_upper == 'PARENT SUB FUND CODE':
+                            parent_sub_fund_code_col = col
+                        elif col_upper == 'ASSET_CLASS' or col_upper == 'ASSET CLASS' or ('ASSET' in col_upper and 'CLASS' in col_upper):
+                            asset_class_col = col
+                    except (TypeError, AttributeError):
+                        # Skip columns that can't be converted to string or checked
+                        continue
                 
                 if scheme_code_col and parent_sub_fund_code_col:
                     # Normalize RTA Master columns for matching
@@ -510,21 +517,37 @@ class SwitchRegisterGUI:
                     # Create mapping: Scheme_code -> PARENT_SUB_FUND_CODE
                     subfund_mapping = rta_df_normalized.set_index(scheme_code_col)[parent_sub_fund_code_col].to_dict()
                     
+                    # Create mapping: Scheme_code -> ASSET_CLASS (if column exists)
+                    asset_class_mapping = {}
+                    if asset_class_col:
+                        rta_df_normalized[asset_class_col] = rta_df_normalized[asset_class_col].astype(str).str.strip()
+                        asset_class_mapping = rta_df_normalized.set_index(scheme_code_col)[asset_class_col].to_dict()
+                    
                     # Match "out Scheme Code" with Scheme_code and get PARENT_SUB_FUND_CODE
                     if 'out Scheme Code' in processed_df.columns:
                         processed_df['out Scheme Code'] = processed_df['out Scheme Code'].astype(str).str.strip()
                         processed_df['out subfund code'] = processed_df['out Scheme Code'].map(subfund_mapping)
                         processed_df['out subfund code'] = processed_df['out subfund code'].fillna('Not Found')
                         
+                        # Get ASSET_CLASS for "out Scheme Code"
+                        if asset_class_mapping:
+                            processed_df['out ASSET_CLASS'] = processed_df['out Scheme Code'].map(asset_class_mapping)
+                            processed_df['out ASSET_CLASS'] = processed_df['out ASSET_CLASS'].fillna('Not Found')
+                        else:
+                            processed_df['out ASSET_CLASS'] = 'Not Found'
+                        
                         # Insert "out subfund code" right after "out Scheme Code"
                         cols = list(processed_df.columns)
                         out_scheme_idx = cols.index('out Scheme Code')
                         # Remove from current position
                         out_subfund = processed_df.pop('out subfund code')
+                        out_asset_class = processed_df.pop('out ASSET_CLASS')
                         # Insert at correct position
                         processed_df.insert(out_scheme_idx + 1, 'out subfund code', out_subfund)
+                        processed_df.insert(out_scheme_idx + 2, 'out ASSET_CLASS', out_asset_class)
                     else:
                         processed_df['out subfund code'] = 'Not Found'
+                        processed_df['out ASSET_CLASS'] = 'Not Found'
                     
                     # Match "IN Scheme Code" with Scheme_code and get PARENT_SUB_FUND_CODE
                     if 'IN Scheme Code' in processed_df.columns:
@@ -532,15 +555,25 @@ class SwitchRegisterGUI:
                         processed_df['IN subfund code'] = processed_df['IN Scheme Code'].map(subfund_mapping)
                         processed_df['IN subfund code'] = processed_df['IN subfund code'].fillna('Not Found')
                         
+                        # Get ASSET_CLASS for "IN Scheme Code"
+                        if asset_class_mapping:
+                            processed_df['IN ASSET_CLASS'] = processed_df['IN Scheme Code'].map(asset_class_mapping)
+                            processed_df['IN ASSET_CLASS'] = processed_df['IN ASSET_CLASS'].fillna('Not Found')
+                        else:
+                            processed_df['IN ASSET_CLASS'] = 'Not Found'
+                        
                         # Insert "IN subfund code" right after "IN Scheme Code"
                         cols = list(processed_df.columns)
                         in_scheme_idx = cols.index('IN Scheme Code')
                         # Remove from current position
                         in_subfund = processed_df.pop('IN subfund code')
+                        in_asset_class = processed_df.pop('IN ASSET_CLASS')
                         # Insert at correct position
                         processed_df.insert(in_scheme_idx + 1, 'IN subfund code', in_subfund)
+                        processed_df.insert(in_scheme_idx + 2, 'IN ASSET_CLASS', in_asset_class)
                     else:
                         processed_df['IN subfund code'] = 'Not Found'
+                        processed_df['IN ASSET_CLASS'] = 'Not Found'
                 else:
                     # If columns not found, show warning but continue
                     missing_cols = []
@@ -552,10 +585,12 @@ class SwitchRegisterGUI:
                     self.root.after(0, lambda: messagebox.showwarning(
                         "Warning",
                         f"Columns not found in RTA Master: {', '.join(missing_cols)}\n"
-                        f"Subfund codes will not be added."
+                        f"Subfund codes and ASSET_CLASS will not be added."
                     ))
                     processed_df['out subfund code'] = 'Not Found'
+                    processed_df['out ASSET_CLASS'] = 'Not Found'
                     processed_df['IN subfund code'] = 'Not Found'
+                    processed_df['IN ASSET_CLASS'] = 'Not Found'
                 
                 loading_window.update_status("Matching with Brokerage Structure...")
                 
@@ -577,34 +612,38 @@ class SwitchRegisterGUI:
                     investment_period_to_col = None
                     
                     for col in combined_brokerage_df.columns:
-                        col_upper = str(col).upper().strip()
-                        # More flexible matching for Cons Code
-                        if 'CONS' in col_upper and 'CODE' in col_upper:
-                            cons_code_col = col
-                        elif col_upper == 'CONS_CODE' or col_upper == 'CONS':
-                            cons_code_col = col
-                        # More flexible matching for Scheme Code
-                        elif 'SCHEME' in col_upper and 'CODE' in col_upper:
-                            scheme_code_b_col = col
-                        elif col_upper == 'SCHEME_CODE' or (col_upper == 'SCHEME' and scheme_code_b_col is None):
-                            scheme_code_b_col = col
-                        # Investment Period From
-                        elif 'INVESTMENT' in col_upper and 'PERIOD' in col_upper and 'FROM' in col_upper:
-                            investment_period_from_col = col
-                        # Investment Period To
-                        elif 'INVESTMENT' in col_upper and 'PERIOD' in col_upper and 'TO' in col_upper:
-                            investment_period_to_col = col
-                        # Trail Rate columns
-                        elif 'TRAIL' in col_upper and '1' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
-                            trail_rate_cols[1] = col
-                        elif 'TRAIL' in col_upper and '2' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
-                            trail_rate_cols[2] = col
-                        elif 'TRAIL' in col_upper and '3' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
-                            trail_rate_cols[3] = col
-                        elif 'TRAIL' in col_upper and '4' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
-                            trail_rate_cols[4] = col
-                        elif 'TRAIL' in col_upper and '5' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
-                            trail_rate_cols[5] = col
+                        try:
+                            col_upper = str(col).upper().strip()
+                            # More flexible matching for Cons Code
+                            if 'CONS' in col_upper and 'CODE' in col_upper:
+                                cons_code_col = col
+                            elif col_upper == 'CONS_CODE' or col_upper == 'CONS':
+                                cons_code_col = col
+                            # More flexible matching for Scheme Code
+                            elif 'SCHEME' in col_upper and 'CODE' in col_upper:
+                                scheme_code_b_col = col
+                            elif col_upper == 'SCHEME_CODE' or (col_upper == 'SCHEME' and scheme_code_b_col is None):
+                                scheme_code_b_col = col
+                            # Investment Period From
+                            elif 'INVESTMENT' in col_upper and 'PERIOD' in col_upper and 'FROM' in col_upper:
+                                investment_period_from_col = col
+                            # Investment Period To
+                            elif 'INVESTMENT' in col_upper and 'PERIOD' in col_upper and 'TO' in col_upper:
+                                investment_period_to_col = col
+                            # Trail Rate columns
+                            elif 'TRAIL' in col_upper and '1' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
+                                trail_rate_cols[1] = col
+                            elif 'TRAIL' in col_upper and '2' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
+                                trail_rate_cols[2] = col
+                            elif 'TRAIL' in col_upper and '3' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
+                                trail_rate_cols[3] = col
+                            elif 'TRAIL' in col_upper and '4' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
+                                trail_rate_cols[4] = col
+                            elif 'TRAIL' in col_upper and '5' in col_upper and ('YEAR' in col_upper or 'YR' in col_upper):
+                                trail_rate_cols[5] = col
+                        except (TypeError, AttributeError):
+                            # Skip columns that can't be converted to string or checked
+                            continue
                     
                     # DEBUG: Print found columns
                     print(f"\n=== DEBUG: Found Columns ===")
@@ -1052,38 +1091,45 @@ class SwitchRegisterGUI:
                 other_columns = []
                 
                 for col in all_columns:
-                    if 'switch in Trail Rate' in col:
-                        # Extract year number
-                        year_match = None
-                        for year in range(1, 6):
-                            if f'{year} year' in col:
-                                year_match = year
-                                break
-                        if year_match:
-                            if year_match not in trail_rate_columns:
-                                trail_rate_columns[year_match] = {}
-                            trail_rate_columns[year_match]['in'] = col
-                    elif 'switch out Trail Rate' in col:
-                        # Extract year number
-                        year_match = None
-                        for year in range(1, 6):
-                            if f'{year} year' in col:
-                                year_match = year
-                                break
-                        if year_match:
-                            if year_match not in trail_rate_columns:
-                                trail_rate_columns[year_match] = {}
-                            trail_rate_columns[year_match]['out'] = col
-                    elif 'Check' in col and 'year' in col:
-                        # Extract year number
-                        year_match = None
-                        for year in range(1, 6):
-                            if f'{year} year' in col:
-                                year_match = year
-                                break
-                        if year_match:
-                            check_columns[year_match] = col
-                    else:
+                    try:
+                        # Ensure col is a string before using 'in' operator
+                        col_str = str(col) if not isinstance(col, str) else col
+                        
+                        if 'switch in Trail Rate' in col_str:
+                            # Extract year number
+                            year_match = None
+                            for year in range(1, 6):
+                                if f'{year} year' in col_str:
+                                    year_match = year
+                                    break
+                            if year_match:
+                                if year_match not in trail_rate_columns:
+                                    trail_rate_columns[year_match] = {}
+                                trail_rate_columns[year_match]['in'] = col
+                        elif 'switch out Trail Rate' in col_str:
+                            # Extract year number
+                            year_match = None
+                            for year in range(1, 6):
+                                if f'{year} year' in col_str:
+                                    year_match = year
+                                    break
+                            if year_match:
+                                if year_match not in trail_rate_columns:
+                                    trail_rate_columns[year_match] = {}
+                                trail_rate_columns[year_match]['out'] = col
+                        elif 'Check' in col_str and 'year' in col_str:
+                            # Extract year number
+                            year_match = None
+                            for year in range(1, 6):
+                                if f'{year} year' in col_str:
+                                    year_match = year
+                                    break
+                            if year_match:
+                                check_columns[year_match] = col
+                        else:
+                            other_columns.append(col)
+                    except (TypeError, AttributeError):
+                        # Skip columns that can't be converted to string
                         other_columns.append(col)
                 
                 # Build new column order: group by year
@@ -1092,11 +1138,16 @@ class SwitchRegisterGUI:
                 # Add other columns first (before trail rate columns)
                 trail_rate_start_idx = None
                 for idx, col in enumerate(all_columns):
-                    if 'switch in Trail Rate' in col or 'switch out Trail Rate' in col or ('Check' in col and 'year' in col):
-                        if trail_rate_start_idx is None:
-                            trail_rate_start_idx = idx
-                        break
-                    new_column_order.append(col)
+                    try:
+                        # Ensure col is a string before using 'in' operator
+                        col_str = str(col) if not isinstance(col, str) else col
+                        if 'switch in Trail Rate' in col_str or 'switch out Trail Rate' in col_str or ('Check' in col_str and 'year' in col_str):
+                            if trail_rate_start_idx is None:
+                                trail_rate_start_idx = idx
+                            break
+                        new_column_order.append(col)
+                    except (TypeError, AttributeError):
+                        new_column_order.append(col)
                 
                 # Add trail rate columns grouped by year
                 for year in range(1, 6):
@@ -1128,40 +1179,53 @@ class SwitchRegisterGUI:
                         if pd.isna(switch_in) or pd.isna(switch_out):
                             return ''
                         
-                        switch_in_str = str(switch_in).strip()
-                        switch_out_str = str(switch_out).strip()
+                        # Ensure we have strings
+                        try:
+                            switch_in_str = str(switch_in).strip() if switch_in is not None else ''
+                            switch_out_str = str(switch_out).strip() if switch_out is not None else ''
+                        except Exception:
+                            return ''
                         
                         if switch_in_str == '' or switch_out_str == '':
                             return ''
                         
                         # Remove code prefix (e.g., "129B/ABSL" or any code before "/")
                         def remove_code_prefix(scheme_str):
-                            if '/' in scheme_str:
-                                # Split by "/" and take everything after the first "/"
-                                parts = scheme_str.split('/', 1)
-                                if len(parts) > 1:
-                                    return parts[1].strip()
-                            return scheme_str
+                            try:
+                                scheme_str = str(scheme_str) if not isinstance(scheme_str, str) else scheme_str
+                                if '/' in scheme_str:
+                                    # Split by "/" and take everything after the first "/"
+                                    parts = scheme_str.split('/', 1)
+                                    if len(parts) > 1:
+                                        return parts[1].strip()
+                                return scheme_str
+                            except Exception:
+                                return str(scheme_str) if scheme_str is not None else ''
                         
                         scheme_in = remove_code_prefix(switch_in_str)
                         scheme_out = remove_code_prefix(switch_out_str)
                         
                         # Normalize by removing plan type indicators (Regular, Direct, Reg, etc.)
                         def normalize_scheme_name(scheme):
-                            # Remove common plan type indicators
-                            scheme_upper = scheme.upper()
-                            # Remove: Regular Growth, Reg Growth, Regular, Reg Plan, Reg, etc.
-                            scheme_upper = scheme_upper.replace('REGULAR GROWTH', '').replace('REG GROWTH', '')
-                            scheme_upper = scheme_upper.replace('REGULAR', '').replace('REG PLAN', '')
-                            scheme_upper = scheme_upper.replace('REG', '').replace('GROWTH', '')
-                            # Remove: Direct Growth, Direct, etc.
-                            scheme_upper = scheme_upper.replace('DIRECT GROWTH', '').replace('DIRECT', '')
-                            # Remove extra spaces and dashes
-                            scheme_upper = scheme_upper.replace('-', '').strip()
-                            # Remove multiple spaces
-                            while '  ' in scheme_upper:
-                                scheme_upper = scheme_upper.replace('  ', ' ')
-                            return scheme_upper.strip()
+                            try:
+                                # Ensure scheme is a string
+                                scheme = str(scheme) if not isinstance(scheme, str) else scheme
+                                # Remove common plan type indicators
+                                scheme_upper = scheme.upper()
+                                # Remove: Regular Growth, Reg Growth, Regular, Reg Plan, Reg, etc.
+                                scheme_upper = scheme_upper.replace('REGULAR GROWTH', '').replace('REG GROWTH', '')
+                                scheme_upper = scheme_upper.replace('REGULAR', '').replace('REG PLAN', '')
+                                scheme_upper = scheme_upper.replace('REG', '').replace('GROWTH', '')
+                                # Remove: Direct Growth, Direct, etc.
+                                scheme_upper = scheme_upper.replace('DIRECT GROWTH', '').replace('DIRECT', '')
+                                # Remove extra spaces and dashes
+                                scheme_upper = scheme_upper.replace('-', '').strip()
+                                # Remove multiple spaces
+                                while '  ' in scheme_upper:
+                                    scheme_upper = scheme_upper.replace('  ', ' ')
+                                return scheme_upper.strip()
+                            except Exception:
+                                return str(scheme) if scheme is not None else ''
                         
                         normalized_in = normalize_scheme_name(scheme_in)
                         normalized_out = normalize_scheme_name(scheme_out)
@@ -1171,16 +1235,24 @@ class SwitchRegisterGUI:
                             return ''
                         
                         # Check if one has Regular and other has Direct
-                        switch_in_upper = switch_in_str.upper()
-                        switch_out_upper = switch_out_str.upper()
-                        
-                        # Check for Regular indicators
-                        has_regular_in = any(indicator in switch_in_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
-                        has_regular_out = any(indicator in switch_out_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
-                        
-                        # Check for Direct indicators
-                        has_direct_in = 'DIRECT' in switch_in_upper
-                        has_direct_out = 'DIRECT' in switch_out_upper
+                        try:
+                            # Ensure we have strings before calling .upper()
+                            switch_in_upper = str(switch_in_str).upper() if switch_in_str is not None else ''
+                            switch_out_upper = str(switch_out_str).upper() if switch_out_str is not None else ''
+                            
+                            # Additional safety check
+                            if not isinstance(switch_in_upper, str) or not isinstance(switch_out_upper, str):
+                                return ''
+                            
+                            # Check for Regular indicators
+                            has_regular_in = any(indicator in switch_in_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
+                            has_regular_out = any(indicator in switch_out_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
+                            
+                            # Check for Direct indicators
+                            has_direct_in = 'DIRECT' in switch_in_upper
+                            has_direct_out = 'DIRECT' in switch_out_upper
+                        except (TypeError, AttributeError):
+                            return ''
                         
                         # If one is Regular and other is Direct, show Check
                         if (has_regular_in and has_direct_out) or (has_direct_in and has_regular_out):

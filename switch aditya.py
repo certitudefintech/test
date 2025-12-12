@@ -747,7 +747,7 @@ class SwitchRegisterGUI:
                                 broker = row.get(broker_col) if broker_col in row.index else None
                                 if pd.isna(broker) or broker == '':
                                     no_match_count += 1
-                                    return ['Not Found'] * 7  # 5 trail rates + 2 period columns
+                                    return ['Not Found'] * 3  # 1 trail rate + 2 period columns
                                 
                                 broker_str = str(broker).strip().upper()
                                 
@@ -755,12 +755,25 @@ class SwitchRegisterGUI:
                                 in_subfund = row.get('IN subfund code') if 'IN subfund code' in row.index else None
                                 if pd.isna(in_subfund) or in_subfund == 'Not Found' or in_subfund == '':
                                     no_match_count += 1
-                                    return ['Not Found'] * 7
+                                    return ['Not Found'] * 3
                                 
                                 in_subfund_str = str(in_subfund).strip().upper()
                                 
                                 # Get transaction date
                                 tran_date = row.get('_TRAN_DATE_DT') if '_TRAN_DATE_DT' in row.index else None
+                                
+                                # Calculate previous month from transaction date
+                                previous_month_date = None
+                                if pd.notna(tran_date):
+                                    try:
+                                        # Get the first day of the transaction month
+                                        first_day_current = tran_date.replace(day=1)
+                                        # Subtract one day to get last day of previous month
+                                        last_day_previous = first_day_current - pd.Timedelta(days=1)
+                                        # Get first day of previous month
+                                        previous_month_date = last_day_previous.replace(day=1)
+                                    except Exception:
+                                        previous_month_date = None
                                 
                                 # DEBUG: Print first few attempts
                                 if match_count + no_match_count < 5:
@@ -768,6 +781,7 @@ class SwitchRegisterGUI:
                                     print(f"Broker: '{broker_str}'")
                                     print(f"IN Subfund: '{in_subfund_str}'")
                                     print(f"Transaction Date: {tran_date}")
+                                    print(f"Previous Month Date: {previous_month_date}")
                                 
                                 # Filter brokerage structure: match Cons Code with broker AND Scheme Code with IN subfund code
                                 mask = (
@@ -789,12 +803,15 @@ class SwitchRegisterGUI:
                                             print(f"  Sample broker match Cons Codes: {broker_matches[cons_code_col].head(3).tolist()}")
                                         if len(scheme_matches) > 0:
                                             print(f"  Sample scheme match Scheme Codes: {scheme_matches[scheme_code_b_col].head(3).tolist()}")
-                                    return ['Not Found'] * 7
+                                    return ['Not Found'] * 4  # 1 current + 1 previous trail rate + 2 period columns
                                 
-                                # Filter by date range if transaction date and period dates are available
+                                # Filter by date range for CURRENT month (transaction date)
+                                current_rate_match = None
+                                previous_rate_match = None
+                                
                                 if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col:
-                                    # Check each match to see if transaction date falls within the period
-                                    date_filtered_matches = []
+                                    # Find match for CURRENT month (transaction date)
+                                    current_date_filtered = []
                                     for idx, match_row in matches.iterrows():
                                         period_from_dt = match_row.get('_PERIOD_FROM_DT')
                                         period_to_dt = match_row.get('_PERIOD_TO_DT')
@@ -802,60 +819,84 @@ class SwitchRegisterGUI:
                                         # If both period dates are valid, check if transaction date is within range
                                         if pd.notna(period_from_dt) and pd.notna(period_to_dt):
                                             if period_from_dt <= tran_date <= period_to_dt:
-                                                date_filtered_matches.append(idx)
+                                                current_date_filtered.append(idx)
                                         # If period dates are missing, include the match (no date filtering)
                                         elif pd.isna(period_from_dt) or pd.isna(period_to_dt):
-                                            date_filtered_matches.append(idx)
+                                            current_date_filtered.append(idx)
                                     
-                                    if date_filtered_matches:
-                                        # Use the first date-filtered match
-                                        matches = matches.loc[date_filtered_matches]
+                                    if current_date_filtered:
+                                        current_rate_match = matches.loc[current_date_filtered[0]]
                                         if match_count + no_match_count < 5:
-                                            print(f"  ✓ Date-filtered match found! (Transaction date within period)")
-                                    else:
-                                        # No matches within date range
-                                        no_match_count += 1
-                                        if match_count + no_match_count <= 5:
-                                            print(f"  ✗ No match within date range (Transaction date: {tran_date})")
-                                            if len(matches) > 0:
-                                                sample_match = matches.iloc[0]
-                                                print(f"    Sample Period From: {sample_match.get('_PERIOD_FROM_DT')}")
-                                                print(f"    Sample Period To: {sample_match.get('_PERIOD_TO_DT')}")
-                                        return ['Not Found'] * 7
-                                else:
-                                    # No date filtering - use first match
-                                    if match_count + no_match_count < 5:
-                                        if pd.isna(tran_date):
-                                            print(f"  ⚠ No transaction date - using first match without date filtering")
+                                            print(f"  ✓ Current month match found! (Transaction date within period)")
+                                    
+                                    # Find match for PREVIOUS month
+                                    if previous_month_date and pd.notna(previous_month_date):
+                                        previous_date_filtered = []
+                                        for idx, match_row in matches.iterrows():
+                                            period_from_dt = match_row.get('_PERIOD_FROM_DT')
+                                            period_to_dt = match_row.get('_PERIOD_TO_DT')
+                                            
+                                            # If both period dates are valid, check if previous month date is within range
+                                            if pd.notna(period_from_dt) and pd.notna(period_to_dt):
+                                                if period_from_dt <= previous_month_date <= period_to_dt:
+                                                    previous_date_filtered.append(idx)
+                                            # If period dates are missing, skip (we need period dates for previous month)
+                                        
+                                        if previous_date_filtered:
+                                            previous_rate_match = matches.loc[previous_date_filtered[0]]
+                                            if match_count + no_match_count < 5:
+                                                print(f"  ✓ Previous month match found! (Previous month date within period)")
                                         else:
-                                            print(f"  ⚠ No period dates in brokerage - using first match without date filtering")
+                                            if match_count + no_match_count < 5:
+                                                print(f"  ✗ No previous month match found (Previous month date: {previous_month_date})")
+                                else:
+                                    # No date filtering - use first match for current only
+                                    if not matches.empty:
+                                        first_match = matches.iloc[0]
+                                        current_rate_match = first_match
+                                        if match_count + no_match_count < 5:
+                                            if pd.isna(tran_date):
+                                                print(f"  ⚠ No transaction date - using first match without date filtering")
+                                            else:
+                                                print(f"  ⚠ No period dates in brokerage - using first match without date filtering")
                                 
                                 match_count += 1
                                 if match_count <= 5:
                                     print(f"  ✓ Match found!")
                                 
-                                # Take first match
-                                first_match = matches.iloc[0]
                                 results = []
                                 
-                                # Get trail rates
-                                for year in range(1, 6):
-                                    if year in trail_rate_cols:
-                                        trail_col = trail_rate_cols[year]
-                                        if trail_col in first_match.index:
-                                            rate_value = first_match[trail_col]
-                                            if pd.notna(rate_value) and str(rate_value).strip() != '':
-                                                results.append(rate_value)
-                                            else:
-                                                results.append('Not Found')
+                                # Get Trail Rate 1 year for CURRENT month
+                                if current_rate_match is not None and 1 in trail_rate_cols:
+                                    trail_col = trail_rate_cols[1]
+                                    if trail_col in current_rate_match.index:
+                                        rate_value = current_rate_match[trail_col]
+                                        if pd.notna(rate_value) and str(rate_value).strip() != '':
+                                            results.append(rate_value)
                                         else:
                                             results.append('Not Found')
                                     else:
                                         results.append('Not Found')
+                                else:
+                                    results.append('Not Found')
                                 
-                                # Get Investment Period From
-                                if investment_period_from_col and investment_period_from_col in first_match.index:
-                                    period_from = first_match[investment_period_from_col]
+                                # Get Trail Rate 1 year for PREVIOUS month
+                                if previous_rate_match is not None and 1 in trail_rate_cols:
+                                    trail_col = trail_rate_cols[1]
+                                    if trail_col in previous_rate_match.index:
+                                        rate_value = previous_rate_match[trail_col]
+                                        if pd.notna(rate_value) and str(rate_value).strip() != '':
+                                            results.append(rate_value)
+                                        else:
+                                            results.append('Not Found')
+                                    else:
+                                        results.append('Not Found')
+                                else:
+                                    results.append('Not Found')
+                                
+                                # Get Investment Period From (from current match)
+                                if current_rate_match is not None and investment_period_from_col and investment_period_from_col in current_rate_match.index:
+                                    period_from = current_rate_match[investment_period_from_col]
                                     if pd.notna(period_from) and str(period_from).strip() != '':
                                         results.append(period_from)
                                     else:
@@ -863,9 +904,9 @@ class SwitchRegisterGUI:
                                 else:
                                     results.append('Not Found')
                                 
-                                # Get Investment Period To
-                                if investment_period_to_col and investment_period_to_col in first_match.index:
-                                    period_to = first_match[investment_period_to_col]
+                                # Get Investment Period To (from current match)
+                                if current_rate_match is not None and investment_period_to_col and investment_period_to_col in current_rate_match.index:
+                                    period_to = current_rate_match[investment_period_to_col]
                                     if pd.notna(period_to) and str(period_to).strip() != '':
                                         results.append(period_to)
                                     else:
@@ -878,16 +919,15 @@ class SwitchRegisterGUI:
                                 no_match_count += 1
                                 if match_count + no_match_count <= 5:
                                     print(f"  Exception: {str(e)}")
-                                return ['Not Found'] * 7
+                                return ['Not Found'] * 4
                         
                         # Apply trail rate and period extraction
                         trail_results = processed_df.apply(get_trail_rates_and_periods, axis=1, result_type='expand')
-                        trail_results.columns = [f'switch in Trail Rate {i} year' for i in range(1, 6)] + ['Investment Period From', 'Investment Period To']
+                        trail_results.columns = ['switch in Trail Rate 1 year', 'PREVIOUS switch in Trail Rate 1 year', 'Investment Period From', 'Investment Period To']
                         
                         # Add trail rate columns to processed_df
-                        for year in range(1, 6):
-                            col_name = f'switch in Trail Rate {year} year'
-                            processed_df[col_name] = trail_results[col_name]
+                        processed_df['switch in Trail Rate 1 year'] = trail_results['switch in Trail Rate 1 year']
+                        processed_df['PREVIOUS switch in Trail Rate 1 year'] = trail_results['PREVIOUS switch in Trail Rate 1 year']
                         
                         # Add Investment Period columns
                         processed_df['Investment Period From'] = trail_results['Investment Period From']
@@ -912,7 +952,7 @@ class SwitchRegisterGUI:
                                 broker = row.get(broker_col) if broker_col in row.index else None
                                 if pd.isna(broker) or broker == '':
                                     no_match_count_out += 1
-                                    return ['Not Found'] * 5  # 5 trail rates only
+                                    return ['Not Found']  # 1 trail rate only
                                 
                                 broker_str = str(broker).strip().upper()
                                 
@@ -920,12 +960,25 @@ class SwitchRegisterGUI:
                                 out_subfund = row.get('out subfund code') if 'out subfund code' in row.index else None
                                 if pd.isna(out_subfund) or out_subfund == 'Not Found' or out_subfund == '':
                                     no_match_count_out += 1
-                                    return ['Not Found'] * 5
+                                    return ['Not Found']
                                 
                                 out_subfund_str = str(out_subfund).strip().upper()
                                 
                                 # Get transaction date
                                 tran_date = row.get('_TRAN_DATE_DT') if '_TRAN_DATE_DT' in row.index else None
+                                
+                                # Calculate previous month from transaction date
+                                previous_month_date = None
+                                if pd.notna(tran_date):
+                                    try:
+                                        # Get the first day of the transaction month
+                                        first_day_current = tran_date.replace(day=1)
+                                        # Subtract one day to get last day of previous month
+                                        last_day_previous = first_day_current - pd.Timedelta(days=1)
+                                        # Get first day of previous month
+                                        previous_month_date = last_day_previous.replace(day=1)
+                                    except Exception:
+                                        previous_month_date = None
                                 
                                 # Filter brokerage structure: match Cons Code with broker AND Scheme Code with OUT subfund code
                                 mask = (
@@ -936,12 +989,15 @@ class SwitchRegisterGUI:
                                 
                                 if matches.empty:
                                     no_match_count_out += 1
-                                    return ['Not Found'] * 5
+                                    return ['Not Found', 'Not Found']  # Current + Previous
                                 
-                                # Filter by date range if transaction date and period dates are available
+                                # Filter by date range for CURRENT and PREVIOUS month
+                                current_rate_match = None
+                                previous_rate_match = None
+                                
                                 if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col:
-                                    # Check each match to see if transaction date falls within the period
-                                    date_filtered_matches = []
+                                    # Find match for CURRENT month (transaction date)
+                                    current_date_filtered = []
                                     for idx, match_row in matches.iterrows():
                                         period_from_dt = match_row.get('_PERIOD_FROM_DT')
                                         period_to_dt = match_row.get('_PERIOD_TO_DT')
@@ -949,53 +1005,79 @@ class SwitchRegisterGUI:
                                         # If both period dates are valid, check if transaction date is within range
                                         if pd.notna(period_from_dt) and pd.notna(period_to_dt):
                                             if period_from_dt <= tran_date <= period_to_dt:
-                                                date_filtered_matches.append(idx)
+                                                current_date_filtered.append(idx)
                                         # If period dates are missing, include the match (no date filtering)
                                         elif pd.isna(period_from_dt) or pd.isna(period_to_dt):
-                                            date_filtered_matches.append(idx)
+                                            current_date_filtered.append(idx)
                                     
-                                    if date_filtered_matches:
-                                        # Use the first date-filtered match
-                                        matches = matches.loc[date_filtered_matches]
-                                    else:
-                                        # No matches within date range
-                                        no_match_count_out += 1
-                                        return ['Not Found'] * 5
+                                    if current_date_filtered:
+                                        current_rate_match = matches.loc[current_date_filtered[0]]
+                                    
+                                    # Find match for PREVIOUS month
+                                    if previous_month_date and pd.notna(previous_month_date):
+                                        previous_date_filtered = []
+                                        for idx, match_row in matches.iterrows():
+                                            period_from_dt = match_row.get('_PERIOD_FROM_DT')
+                                            period_to_dt = match_row.get('_PERIOD_TO_DT')
+                                            
+                                            # If both period dates are valid, check if previous month date is within range
+                                            if pd.notna(period_from_dt) and pd.notna(period_to_dt):
+                                                if period_from_dt <= previous_month_date <= period_to_dt:
+                                                    previous_date_filtered.append(idx)
+                                            # If period dates are missing, skip (we need period dates for previous month)
+                                        
+                                        if previous_date_filtered:
+                                            previous_rate_match = matches.loc[previous_date_filtered[0]]
+                                else:
+                                    # No date filtering - use first match for current only
+                                    if not matches.empty:
+                                        first_match = matches.iloc[0]
+                                        current_rate_match = first_match
                                 
                                 match_count_out += 1
                                 
-                                # Take first match
-                                first_match = matches.iloc[0]
                                 results = []
                                 
-                                # Get trail rates
-                                for year in range(1, 6):
-                                    if year in trail_rate_cols:
-                                        trail_col = trail_rate_cols[year]
-                                        if trail_col in first_match.index:
-                                            rate_value = first_match[trail_col]
-                                            if pd.notna(rate_value) and str(rate_value).strip() != '':
-                                                results.append(rate_value)
-                                            else:
-                                                results.append('Not Found')
+                                # Get Trail Rate 1 year for CURRENT month
+                                if current_rate_match is not None and 1 in trail_rate_cols:
+                                    trail_col = trail_rate_cols[1]
+                                    if trail_col in current_rate_match.index:
+                                        rate_value = current_rate_match[trail_col]
+                                        if pd.notna(rate_value) and str(rate_value).strip() != '':
+                                            results.append(rate_value)
                                         else:
                                             results.append('Not Found')
                                     else:
                                         results.append('Not Found')
+                                else:
+                                    results.append('Not Found')
+                                
+                                # Get Trail Rate 1 year for PREVIOUS month
+                                if previous_rate_match is not None and 1 in trail_rate_cols:
+                                    trail_col = trail_rate_cols[1]
+                                    if trail_col in previous_rate_match.index:
+                                        rate_value = previous_rate_match[trail_col]
+                                        if pd.notna(rate_value) and str(rate_value).strip() != '':
+                                            results.append(rate_value)
+                                        else:
+                                            results.append('Not Found')
+                                    else:
+                                        results.append('Not Found')
+                                else:
+                                    results.append('Not Found')
                                 
                                 return results
                             except Exception as e:
                                 no_match_count_out += 1
-                                return ['Not Found'] * 5
+                                return ['Not Found', 'Not Found']
                         
                         # Apply trail rate extraction for OUT subfund code
                         trail_results_out = processed_df.apply(get_trail_rates_out, axis=1, result_type='expand')
-                        trail_results_out.columns = [f'switch out Trail Rate {i} year' for i in range(1, 6)]
+                        trail_results_out.columns = ['switch out Trail Rate 1 year', 'PREVIOUS switch out Trail Rate 1 year']
                         
                         # Add "switch out" trail rate columns to processed_df
-                        for year in range(1, 6):
-                            col_name = f'switch out Trail Rate {year} year'
-                            processed_df[col_name] = trail_results_out[col_name]
+                        processed_df['switch out Trail Rate 1 year'] = trail_results_out['switch out Trail Rate 1 year']
+                        processed_df['PREVIOUS switch out Trail Rate 1 year'] = trail_results_out['PREVIOUS switch out Trail Rate 1 year']
                         
                         # DEBUG: Print summary for OUT
                         print(f"\n=== DEBUG: Matching Summary (OUT) ===")
@@ -1033,19 +1115,62 @@ class SwitchRegisterGUI:
                             except Exception:
                                 return ''
                         
-                        # Add check columns for each year
-                        for year in range(1, 6):
-                            col_in = f'switch in Trail Rate {year} year'
-                            col_out = f'switch out Trail Rate {year} year'
-                            check_col = f'Check {year} year'
-                            
-                            if col_in in processed_df.columns and col_out in processed_df.columns:
-                                processed_df[check_col] = processed_df.apply(
-                                    lambda row: compare_trail_rates(row[col_in], row[col_out]),
-                                    axis=1
-                                )
-                            else:
-                                processed_df[check_col] = ''
+                        # Add check column for 1 year only
+                        col_in = 'switch in Trail Rate 1 year'
+                        col_out = 'switch out Trail Rate 1 year'
+                        check_col = 'Check 1 year'
+                        
+                        if col_in in processed_df.columns and col_out in processed_df.columns:
+                            processed_df[check_col] = processed_df.apply(
+                                lambda row: compare_trail_rates(row[col_in], row[col_out]),
+                                axis=1
+                            )
+                        else:
+                            processed_df[check_col] = ''
+                        
+                        # Add check: PREVIOUS switch in Trail Rate 1 year < switch in Trail Rate 1 year
+                        loading_window.update_status("Calculating previous vs current check...")
+                        
+                        def compare_previous_vs_current(previous_value, current_value):
+                            """Compare previous and current trail rate values and return 'Check' if previous < current"""
+                            try:
+                                # Handle "Not Found" or empty values
+                                if pd.isna(previous_value) or str(previous_value).strip() == '' or str(previous_value).strip().upper() == 'NOT FOUND':
+                                    return ''
+                                if pd.isna(current_value) or str(current_value).strip() == '' or str(current_value).strip().upper() == 'NOT FOUND':
+                                    return ''
+                                
+                                # Convert to numeric, handling percentage signs and other formats
+                                prev_str = str(previous_value).strip().replace('%', '').replace(',', '')
+                                curr_str = str(current_value).strip().replace('%', '').replace(',', '')
+                                
+                                try:
+                                    prev_num = float(prev_str)
+                                    curr_num = float(curr_str)
+                                    
+                                    # If previous < current, return "Check"
+                                    if prev_num < curr_num:
+                                        return 'Check'
+                                    else:
+                                        return ''
+                                except (ValueError, TypeError):
+                                    # If conversion fails, return empty
+                                    return ''
+                            except Exception:
+                                return ''
+                        
+                        # Add check column for previous vs current
+                        prev_col = 'PREVIOUS switch in Trail Rate 1 year'
+                        curr_col = 'switch in Trail Rate 1 year'
+                        prev_check_col = 'PREVIOUS switch in Trail Rate 1 year Check'
+                        
+                        if prev_col in processed_df.columns and curr_col in processed_df.columns:
+                            processed_df[prev_check_col] = processed_df.apply(
+                                lambda row: compare_previous_vs_current(row[prev_col], row[curr_col]),
+                                axis=1
+                            )
+                        else:
+                            processed_df[prev_check_col] = ''
                     else:
                         # Missing required columns
                         missing_cols = []
@@ -1064,18 +1189,22 @@ class SwitchRegisterGUI:
                             f"Trail rates will not be added."
                         ))
                         # Add empty trail rate columns
-                        for year in range(1, 6):
-                            processed_df[f'switch in Trail Rate {year} year'] = 'Not Found'
-                            processed_df[f'switch out Trail Rate {year} year'] = 'Not Found'
-                            processed_df[f'Check {year} year'] = ''
+                        processed_df['switch in Trail Rate 1 year'] = 'Not Found'
+                        processed_df['PREVIOUS switch in Trail Rate 1 year'] = 'Not Found'
+                        processed_df['switch out Trail Rate 1 year'] = 'Not Found'
+                        processed_df['PREVIOUS switch out Trail Rate 1 year'] = 'Not Found'
+                        processed_df['Check 1 year'] = ''
+                        processed_df['PREVIOUS switch in Trail Rate 1 year Check'] = ''
                         processed_df['Investment Period From'] = 'Not Found'
                         processed_df['Investment Period To'] = 'Not Found'
                 else:
                     # No brokerage structure data
-                    for year in range(1, 6):
-                        processed_df[f'switch in Trail Rate {year} year'] = 'Not Found'
-                        processed_df[f'switch out Trail Rate {year} year'] = 'Not Found'
-                        processed_df[f'Check {year} year'] = ''
+                    processed_df['switch in Trail Rate 1 year'] = 'Not Found'
+                    processed_df['PREVIOUS switch in Trail Rate 1 year'] = 'Not Found'
+                    processed_df['switch out Trail Rate 1 year'] = 'Not Found'
+                    processed_df['PREVIOUS switch out Trail Rate 1 year'] = 'Not Found'
+                    processed_df['Check 1 year'] = ''
+                    processed_df['PREVIOUS switch in Trail Rate 1 year Check'] = ''
                     processed_df['Investment Period From'] = 'Not Found'
                     processed_df['Investment Period To'] = 'Not Found'
                 
@@ -1085,84 +1214,57 @@ class SwitchRegisterGUI:
                 # Get all current columns
                 all_columns = list(processed_df.columns)
                 
-                # Find columns to reorder
-                trail_rate_columns = {}
-                check_columns = {}
-                other_columns = []
+                # Find trail rate and check columns
+                switch_in_col = None
+                previous_switch_in_col = None
+                switch_out_col = None
+                previous_switch_out_col = None
+                check_col = None
+                prev_check_col = None
                 
                 for col in all_columns:
                     try:
                         # Ensure col is a string before using 'in' operator
                         col_str = str(col) if not isinstance(col, str) else col
                         
-                        if 'switch in Trail Rate' in col_str:
-                            # Extract year number
-                            year_match = None
-                            for year in range(1, 6):
-                                if f'{year} year' in col_str:
-                                    year_match = year
-                                    break
-                            if year_match:
-                                if year_match not in trail_rate_columns:
-                                    trail_rate_columns[year_match] = {}
-                                trail_rate_columns[year_match]['in'] = col
-                        elif 'switch out Trail Rate' in col_str:
-                            # Extract year number
-                            year_match = None
-                            for year in range(1, 6):
-                                if f'{year} year' in col_str:
-                                    year_match = year
-                                    break
-                            if year_match:
-                                if year_match not in trail_rate_columns:
-                                    trail_rate_columns[year_match] = {}
-                                trail_rate_columns[year_match]['out'] = col
-                        elif 'Check' in col_str and 'year' in col_str:
-                            # Extract year number
-                            year_match = None
-                            for year in range(1, 6):
-                                if f'{year} year' in col_str:
-                                    year_match = year
-                                    break
-                            if year_match:
-                                check_columns[year_match] = col
-                        else:
-                            other_columns.append(col)
+                        if col_str == 'switch in Trail Rate 1 year':
+                            switch_in_col = col
+                        elif col_str == 'PREVIOUS switch in Trail Rate 1 year':
+                            previous_switch_in_col = col
+                        elif col_str == 'switch out Trail Rate 1 year':
+                            switch_out_col = col
+                        elif col_str == 'PREVIOUS switch out Trail Rate 1 year':
+                            previous_switch_out_col = col
+                        elif col_str == 'Check 1 year':
+                            check_col = col
+                        elif col_str == 'PREVIOUS switch in Trail Rate 1 year Check':
+                            prev_check_col = col
                     except (TypeError, AttributeError):
                         # Skip columns that can't be converted to string
-                        other_columns.append(col)
+                        pass
                 
-                # Build new column order: group by year
+                # Build new column order: switch in, previous switch in, previous check, switch out, previous switch out, check
                 new_column_order = []
                 
                 # Add other columns first (before trail rate columns)
-                trail_rate_start_idx = None
-                for idx, col in enumerate(all_columns):
-                    try:
-                        # Ensure col is a string before using 'in' operator
-                        col_str = str(col) if not isinstance(col, str) else col
-                        if 'switch in Trail Rate' in col_str or 'switch out Trail Rate' in col_str or ('Check' in col_str and 'year' in col_str):
-                            if trail_rate_start_idx is None:
-                                trail_rate_start_idx = idx
-                            break
-                        new_column_order.append(col)
-                    except (TypeError, AttributeError):
-                        new_column_order.append(col)
-                
-                # Add trail rate columns grouped by year
-                for year in range(1, 6):
-                    if year in trail_rate_columns:
-                        if 'in' in trail_rate_columns[year]:
-                            new_column_order.append(trail_rate_columns[year]['in'])
-                        if 'out' in trail_rate_columns[year]:
-                            new_column_order.append(trail_rate_columns[year]['out'])
-                    if year in check_columns:
-                        new_column_order.append(check_columns[year])
-                
-                # Add remaining columns that weren't in the original order
                 for col in all_columns:
-                    if col not in new_column_order:
-                        new_column_order.append(col)
+                    if col not in [switch_in_col, previous_switch_in_col, switch_out_col, previous_switch_out_col, check_col, prev_check_col]:
+                        if col not in new_column_order:
+                            new_column_order.append(col)
+                
+                # Add trail rate columns in order: switch in, previous switch in, previous check, switch out, previous switch out, check
+                if switch_in_col:
+                    new_column_order.append(switch_in_col)
+                if previous_switch_in_col:
+                    new_column_order.append(previous_switch_in_col)
+                if prev_check_col:
+                    new_column_order.append(prev_check_col)
+                if switch_out_col:
+                    new_column_order.append(switch_out_col)
+                if previous_switch_out_col:
+                    new_column_order.append(previous_switch_out_col)
+                if check_col:
+                    new_column_order.append(check_col)
                 
                 # Reorder the dataframe
                 processed_df = processed_df[new_column_order]

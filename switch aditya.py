@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
+import difflib
 import customtkinter as ctk
 import threading
 import time
@@ -1261,21 +1262,37 @@ class SwitchRegisterGUI:
                 # Add check for Regular vs Direct scheme matching
                 loading_window.update_status("Checking Regular vs Direct scheme matches...")
                 
-                # Find switch in/out scheme columns (use IN_SCHEME_, OUT_SCHEM0/OUT_SCHEME or legacy names)
+                # Find switch in/out scheme columns (IN_SCHEME_, OUT_SCHEM0/OUT_SCHEME or legacy)
+                def _norm_col(s):
+                    try:
+                        t = str(s).upper().lstrip('\ufeff').strip()
+                        return ' '.join(t.split()).replace(' ', '_')
+                    except (TypeError, AttributeError):
+                        return ''
                 in_scheme_col = None
                 out_scheme_col = None
                 for col in processed_df.columns:
-                    c = str(col).upper().strip()
-                    if c in ('IN_SCHEME_', 'IN_SCHEME', 'IN SCHEME'):
+                    col_str = str(col).strip()
+                    c = _norm_col(col)
+                    # Exact match first (user's columns: IN_SCHEME_, OUT_SCHEM0)
+                    if col_str.upper() in ('IN_SCHEME_', 'IN_SCHEME'):
                         in_scheme_col = col
-                        break
+                    if col_str.upper() in ('OUT_SCHEM0', 'OUT_SCHEME'):
+                        out_scheme_col = col
+                if not in_scheme_col:
+                    for col in processed_df.columns:
+                        c = _norm_col(col)
+                        if 'IN_SCHEME' in c or c in ('IN_SCHEME_', 'INSCHEME', 'SCHEME_IN'):
+                            in_scheme_col = col
+                            break
+                if not out_scheme_col:
+                    for col in processed_df.columns:
+                        c = _norm_col(col)
+                        if 'OUT_SCHEM' in c or 'OUT_SCHEME' in c or c in ('OUTSCHEME', 'SCHEME_OUT'):
+                            out_scheme_col = col
+                            break
                 if not in_scheme_col and 'switch in scheme' in processed_df.columns:
                     in_scheme_col = 'switch in scheme'
-                for col in processed_df.columns:
-                    c = str(col).upper().strip()
-                    if c in ('OUT_SCHEM0', 'OUT_SCHEME', 'OUT SCHEME'):
-                        out_scheme_col = col
-                        break
                 if not out_scheme_col and 'switch out scheme' in processed_df.columns:
                     out_scheme_col = 'switch out scheme'
                 
@@ -1314,56 +1331,51 @@ class SwitchRegisterGUI:
                         scheme_in = remove_code_prefix(switch_in_str)
                         scheme_out = remove_code_prefix(switch_out_str)
                         
-                        # Normalize by removing plan type indicators (Regular, Direct, Reg, etc.)
-                        def normalize_scheme_name(scheme):
-                            try:
-                                # Ensure scheme is a string
-                                scheme = str(scheme) if not isinstance(scheme, str) else scheme
-                                # Remove common plan type indicators
-                                scheme_upper = scheme.upper()
-                                # Remove: Regular Growth, Reg Growth, Regular, Reg Plan, Reg, etc.
-                                scheme_upper = scheme_upper.replace('REGULAR GROWTH', '').replace('REG GROWTH', '')
-                                scheme_upper = scheme_upper.replace('REGULAR', '').replace('REG PLAN', '')
-                                scheme_upper = scheme_upper.replace('REG', '').replace('GROWTH', '')
-                                # Remove: Direct Growth, Direct, etc.
-                                scheme_upper = scheme_upper.replace('DIRECT GROWTH', '').replace('DIRECT', '')
-                                # Remove extra spaces and dashes
-                                scheme_upper = scheme_upper.replace('-', '').strip()
-                                # Remove multiple spaces
-                                while '  ' in scheme_upper:
-                                    scheme_upper = scheme_upper.replace('  ', ' ')
-                                return scheme_upper.strip()
-                            except Exception:
-                                return str(scheme) if scheme is not None else ''
-                        
-                        normalized_in = normalize_scheme_name(scheme_in)
-                        normalized_out = normalize_scheme_name(scheme_out)
-                        
-                        # Check if normalized scheme names match
-                        if normalized_in != normalized_out:
+                        if not scheme_in or not scheme_out:
                             return ''
+                        
+                        # Normalize: remove Regular, Direct, Reg, Growth, Plan so "Regular" vs "Direct" don't hurt similarity
+                        def normalize_for_match(scheme):
+                            try:
+                                s = str(scheme).upper()
+                                for word in ['REGULAR GROWTH', 'REG GROWTH', 'REGULAR', 'REG PLAN', 'DIRECT GROWTH', 'DIRECT', 'REG', 'GROWTH', 'PLAN']:
+                                    s = s.replace(word, '')
+                                s = s.replace('-', ' ').replace('_', ' ').strip()
+                                while '  ' in s:
+                                    s = s.replace('  ', ' ')
+                                return s.strip()
+                            except Exception:
+                                return str(scheme) if scheme else ''
+                        
+                        norm_in = normalize_for_match(scheme_in)
+                        norm_out = normalize_for_match(scheme_out)
+                        if not norm_in and not norm_out:
+                            return ''
+                        if not norm_in or not norm_out:
+                            return ''
+                        # Exact match or fuzzy 80% on normalized base names
+                        if norm_in == norm_out:
+                            pass  # same scheme
+                        else:
+                            similarity = difflib.SequenceMatcher(None, norm_in, norm_out).ratio()
+                            if similarity < 0.75:
+                                return ''
                         
                         # Check if one has Regular and other has Direct
                         try:
-                            # Ensure we have strings before calling .upper()
                             switch_in_upper = str(switch_in_str).upper() if switch_in_str is not None else ''
                             switch_out_upper = str(switch_out_str).upper() if switch_out_str is not None else ''
-                            
-                            # Additional safety check
                             if not isinstance(switch_in_upper, str) or not isinstance(switch_out_upper, str):
                                 return ''
-                            
-                            # Check for Regular indicators
-                            has_regular_in = any(indicator in switch_in_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
-                            has_regular_out = any(indicator in switch_out_upper for indicator in ['REGULAR', 'REG GROWTH', 'REG PLAN', 'REG '])
-                            
-                            # Check for Direct indicators
+                            # Regular: REGULAR, REG GROWTH, REG PLAN, REG (with word boundary)
+                            has_regular_in = 'REGULAR' in switch_in_upper or 'REG GROWTH' in switch_in_upper or 'REG PLAN' in switch_in_upper or '-REG-' in switch_in_upper or ' REG ' in switch_in_upper
+                            has_regular_out = 'REGULAR' in switch_out_upper or 'REG GROWTH' in switch_out_upper or 'REG PLAN' in switch_out_upper or '-REG-' in switch_out_upper or ' REG ' in switch_out_upper
+                            # Direct
                             has_direct_in = 'DIRECT' in switch_in_upper
                             has_direct_out = 'DIRECT' in switch_out_upper
                         except (TypeError, AttributeError):
                             return ''
-                        
-                        # If one is Regular and other is Direct, show Check
+                        # One Regular + one Direct = Check (e.g. -PLAN-Regular-Growth vs -PLAN-Direct-Growth)
                         if (has_regular_in and has_direct_out) or (has_direct_in and has_regular_out):
                             return 'Check'
                         
@@ -1376,6 +1388,14 @@ class SwitchRegisterGUI:
                     processed_df['Regular vs Direct Check'] = processed_df.apply(check_regular_direct_match, axis=1)
                 else:
                     processed_df['Regular vs Direct Check'] = ''
+                    if not in_scheme_col or not out_scheme_col:
+                        cols_found = [c for c in processed_df.columns if 'SCHEME' in str(c).upper() or 'SCHEM' in str(c).upper()]
+                        self.root.after(0, lambda: messagebox.showwarning(
+                            "Regular vs Direct Check",
+                            f"Could not find scheme columns for Regular vs Direct check.\n"
+                            f"Looking for: IN_SCHEME_ (or IN_SCHEME), OUT_SCHEM0 (or OUT_SCHEME)\n"
+                            f"Columns with SCHEME in name: {cols_found[:10] if cols_found else 'None'}"
+                        ))
                 
                 loading_window.update_status("Processing complete...")
                 time.sleep(0.3)
@@ -1413,6 +1433,29 @@ class SwitchRegisterGUI:
                         ))
                 else:
                     print("\n=== Warning: Broker column not found, skipping DIRECT filter ===")
+                
+                # Output only these columns, in this exact order
+                OUTPUT_COLUMNS = [
+                    'SL_NO', 'FOLIO_NO', 'INVESTOR_F', 'USER_TRXNN', 'OUT_TRXN_N',
+                    'SO_ASSET_C', 'OUT_SUBFUN', 'OUT_SCHEME', 'OUT_SCHEM0', 'OUT_TRADE_',
+                    'OUT_BROKER', 'OUT_BROKE1', 'SO_UNITS', 'SO_AMOUNT',
+                    'IN_SUBFUND', 'IN_SCHEME', 'IN_SCHEME_', 'SI_ASSET_C', 'IN_TRADE_D',
+                    'IN_BROKER', 'SI_UNITS', 'SI_AMOUNT',
+                    'IN ASSET_CLASS', 'out ASSET_CLASS',
+                    'Investment Period From', 'Investment Period To',
+                    'switch in Trail Rate 1 year', 'PREVIOUS switch in Trail Rate 1 year',
+                    'PREVIOUS switch in Trail Rate 1 year Check',
+                    'switch out Trail Rate 1 year', 'PREVIOUS switch out Trail Rate 1 year',
+                    'Check 1 year', 'Regular vs Direct Check'
+                ]
+                final_cols = []
+                for col in OUTPUT_COLUMNS:
+                    if col in processed_df.columns:
+                        final_cols.append(col)
+                    else:
+                        processed_df[col] = ''
+                        final_cols.append(col)
+                processed_df = processed_df[final_cols]
                 
                 loading_window.update_status("Preparing to save...")
                 save_path = filedialog.asksaveasfilename(

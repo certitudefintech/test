@@ -1261,11 +1261,29 @@ class SwitchRegisterGUI:
                 # Add check for Regular vs Direct scheme matching
                 loading_window.update_status("Checking Regular vs Direct scheme matches...")
                 
+                # Find switch in/out scheme columns (use IN_SCHEME_, OUT_SCHEM0/OUT_SCHEME or legacy names)
+                in_scheme_col = None
+                out_scheme_col = None
+                for col in processed_df.columns:
+                    c = str(col).upper().strip()
+                    if c in ('IN_SCHEME_', 'IN_SCHEME', 'IN SCHEME'):
+                        in_scheme_col = col
+                        break
+                if not in_scheme_col and 'switch in scheme' in processed_df.columns:
+                    in_scheme_col = 'switch in scheme'
+                for col in processed_df.columns:
+                    c = str(col).upper().strip()
+                    if c in ('OUT_SCHEM0', 'OUT_SCHEME', 'OUT SCHEME'):
+                        out_scheme_col = col
+                        break
+                if not out_scheme_col and 'switch out scheme' in processed_df.columns:
+                    out_scheme_col = 'switch out scheme'
+                
                 def check_regular_direct_match(row):
                     """Check if switch in and switch out schemes are the same but one is Regular and other is Direct"""
                     try:
-                        switch_in = row.get('switch in scheme') if 'switch in scheme' in row.index else None
-                        switch_out = row.get('switch out scheme') if 'switch out scheme' in row.index else None
+                        switch_in = row.get(in_scheme_col) if in_scheme_col and in_scheme_col in row.index else None
+                        switch_out = row.get(out_scheme_col) if out_scheme_col and out_scheme_col in row.index else None
                         
                         if pd.isna(switch_in) or pd.isna(switch_out):
                             return ''
@@ -1354,7 +1372,7 @@ class SwitchRegisterGUI:
                         return ''
                 
                 # Add the check column
-                if 'switch in scheme' in processed_df.columns and 'switch out scheme' in processed_df.columns:
+                if in_scheme_col and out_scheme_col and in_scheme_col in processed_df.columns and out_scheme_col in processed_df.columns:
                     processed_df['Regular vs Direct Check'] = processed_df.apply(check_regular_direct_match, axis=1)
                 else:
                     processed_df['Regular vs Direct Check'] = ''

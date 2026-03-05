@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
 import customtkinter as ctk
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 import threading
@@ -1409,36 +1409,21 @@ class SwitchRegisterGUI:
                 if save_path:
                     try:
                         loading_window.update_status("Saving file...")
-                        # Save processed data to Excel
-                        wb = Workbook()
+                        # Fast save: pandas to_excel (bulk write) instead of cell-by-cell
+                        processed_df.to_excel(save_path, sheet_name='Processed Data', index=False, engine='openpyxl')
+                        # Quick pass: style header row only (minimal overhead)
+                        wb = load_workbook(save_path)
                         ws = wb.active
-                        ws.title = 'Processed Data'
-                        
-                        # Write headers
                         for col_idx, col_name in enumerate(processed_df.columns, 1):
-                            cell = ws.cell(row=1, column=col_idx, value=col_name)
+                            cell = ws.cell(row=1, column=col_idx)
                             cell.fill = PatternFill(start_color='305496', end_color='305496', fill_type='solid')
                             cell.font = Font(color='FFFFFF', bold=True, size=11, name='Calibri')
                             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                        
-                        # Write data rows
-                        for row_idx, row in enumerate(processed_df.itertuples(index=False), 2):
-                            for col_idx, value in enumerate(row, 1):
-                                cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                                cell.font = Font(size=10, name='Calibri')
-                                cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-                        
-                        # Auto-adjust column widths
-                        for col_idx in range(1, ws.max_column + 1):
+                        # Column width from header only (skip full-scan)
+                        for col_idx in range(1, len(processed_df.columns) + 1):
                             col_letter = get_column_letter(col_idx)
-                            max_length = 0
-                            for row_idx in range(1, ws.max_row + 1):
-                                cell = ws.cell(row=row_idx, column=col_idx)
-                                if cell.value:
-                                    max_length = max(max_length, len(str(cell.value)))
-                            adjusted_width = min(max(max_length + 2, 12), 50)
-                            ws.column_dimensions[col_letter].width = adjusted_width
-                        
+                            hdr_len = len(str(processed_df.columns[col_idx - 1]))
+                            ws.column_dimensions[col_letter].width = min(max(hdr_len + 2, 12), 50)
                         wb.save(save_path)
                         
                         loading_window.update_status("Complete!")

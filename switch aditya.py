@@ -2,9 +2,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
 import customtkinter as ctk
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill, Font, Alignment
-from openpyxl.utils import get_column_letter
 import threading
 import time
 import os
@@ -1403,28 +1400,25 @@ class SwitchRegisterGUI:
                 save_path = filedialog.asksaveasfilename(
                     title="Save Processed File",
                     defaultextension=".xlsx",
-                    filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+                    filetypes=[
+                        ("Excel files", "*.xlsx"),
+                        ("CSV files (faster for large files)", "*.csv"),
+                        ("All files", "*.*")
+                    ]
                 )
                 
                 if save_path:
                     try:
                         loading_window.update_status("Saving file...")
-                        # Fast save: pandas to_excel (bulk write) instead of cell-by-cell
-                        processed_df.to_excel(save_path, sheet_name='Processed Data', index=False, engine='openpyxl')
-                        # Quick pass: style header row only (minimal overhead)
-                        wb = load_workbook(save_path)
-                        ws = wb.active
-                        for col_idx, col_name in enumerate(processed_df.columns, 1):
-                            cell = ws.cell(row=1, column=col_idx)
-                            cell.fill = PatternFill(start_color='305496', end_color='305496', fill_type='solid')
-                            cell.font = Font(color='FFFFFF', bold=True, size=11, name='Calibri')
-                            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                        # Column width from header only (skip full-scan)
-                        for col_idx in range(1, len(processed_df.columns) + 1):
-                            col_letter = get_column_letter(col_idx)
-                            hdr_len = len(str(processed_df.columns[col_idx - 1]))
-                            ws.column_dimensions[col_letter].width = min(max(hdr_len + 2, 12), 50)
-                        wb.save(save_path)
+                        # CSV: very fast even for millions of rows (recommended for large files)
+                        if save_path.lower().endswith('.csv'):
+                            processed_df.to_csv(save_path, index=False, encoding='utf-8-sig')
+                        else:
+                            # Excel: can be slow for 20k+ rows — use CSV for large files
+                            try:
+                                processed_df.to_excel(save_path, sheet_name='Processed Data', index=False, engine='xlsxwriter')
+                            except ImportError:
+                                processed_df.to_excel(save_path, sheet_name='Processed Data', index=False, engine='openpyxl')
                         
                         loading_window.update_status("Complete!")
                         time.sleep(0.5)

@@ -341,13 +341,6 @@ class SwitchRegisterGUI:
             )
             return
         
-        if not self.rta_master_path:
-            messagebox.showwarning(
-                "Incomplete Upload",
-                "Please upload RTA Master file before processing."
-            )
-            return
-        
         if len(self.brokerage_structure_paths) == 0:
             messagebox.showwarning(
                 "Incomplete Upload",
@@ -377,22 +370,63 @@ class SwitchRegisterGUI:
                     self.root.after(0, loading_window.stop)
                     return
                 
-                loading_window.update_status("Reading RTA Master file...")
-                # Read RTA Master file
-                if self.rta_master_path.endswith('.csv'):
-                    rta_df = pd.read_csv(self.rta_master_path)
+                # Detect if Switch Register has IN/OUT broker, subfund, and asset columns (no RTA needed)
+                # Normalize: strip and collapse spaces so "OUT SUBFUN" / "OUT_SUBFUN" both match
+                def _norm(s):
+                    try:
+                        t = str(s).upper().lstrip('\ufeff').strip()
+                        return ' '.join(t.split()).replace(' ', '_')
+                    except (TypeError, AttributeError):
+                        return ''
+                in_broker_col = None
+                in_subfund_col = None
+                out_broker_col = None
+                out_subfund_col = None
+                so_asset_col = None
+                si_asset_col = None
+                for col in switch_df.columns:
+                    try:
+                        c = _norm(col)
+                        c_spaces = c.replace('_', ' ')
+                        if c in ('IN_BROKER',) or c_spaces == 'IN BROKER':
+                            in_broker_col = col
+                        elif c in ('IN_SUBFUND', 'IN_SUBFUN',) or c_spaces in ('IN SUBFUND', 'IN SUBFUN'):
+                            in_subfund_col = col
+                        elif c in ('OUT_BROKER',) or c_spaces == 'OUT BROKER':
+                            out_broker_col = col
+                        elif c in ('OUT_SUBFUND', 'OUT_SUBFUN',) or c_spaces in ('OUT SUBFUND', 'OUT SUBFUN'):
+                            out_subfund_col = col
+                        elif c in ('SO_ASSET_C',) or c_spaces == 'SO ASSET C':
+                            so_asset_col = col
+                        elif c in ('SI_ASSET_C', 'IN_ASSET_C',) or c_spaces in ('SI ASSET C', 'IN ASSET C'):
+                            si_asset_col = col
+                    except (TypeError, AttributeError):
+                        continue
+                use_switch_columns = bool(in_broker_col and in_subfund_col and out_broker_col and out_subfund_col)
+                if use_switch_columns:
+                    loading_window.update_status("Using broker/subfund/asset from Switch Register (no RTA)...")
                 else:
-                    rta_df = pd.read_excel(self.rta_master_path)
-                
-                # Check for duplicate columns
-                if rta_df.columns.duplicated().any():
-                    dupes = rta_df.columns[rta_df.columns.duplicated()].tolist()
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "Error",
-                        f"RTA Master file has duplicate column names: {dupes}. Please fix the file and try again."
-                    ))
-                    self.root.after(0, loading_window.stop)
-                    return
+                    if not self.rta_master_path:
+                        self.root.after(0, lambda: messagebox.showwarning(
+                            "Incomplete Upload",
+                            "Please upload RTA Master file, or use a Switch Register with columns: "
+                            "IN_BROKER, IN_SUBFUND, OUT_BROKER, OUT_SUBFUN (or OUT_SUBFUND), SO_ASSET_C, SI_ASSET_C (or IN_ASSET_C)."
+                        ))
+                        self.root.after(0, loading_window.stop)
+                        return
+                    loading_window.update_status("Reading RTA Master file...")
+                    if self.rta_master_path.endswith('.csv'):
+                        rta_df = pd.read_csv(self.rta_master_path)
+                    else:
+                        rta_df = pd.read_excel(self.rta_master_path)
+                    if rta_df.columns.duplicated().any():
+                        dupes = rta_df.columns[rta_df.columns.duplicated()].tolist()
+                        self.root.after(0, lambda: messagebox.showerror(
+                            "Error",
+                            f"RTA Master file has duplicate column names: {dupes}. Please fix the file and try again."
+                        ))
+                        self.root.after(0, loading_window.stop)
+                        return
                 
                 loading_window.update_status("Reading Brokerage Structure file(s)...")
                 # Read all Brokerage Structure files
@@ -423,174 +457,180 @@ class SwitchRegisterGUI:
                 
                 loading_window.update_status("Processing Switch Register data...")
                 
-                # Process Switch Register: Extract scheme codes from "From" and "Scheme :" columns
                 processed_df = switch_df.copy()
                 
-                # Function to extract scheme code (part before "/")
-                def extract_scheme_code(value):
-                    if pd.isna(value):
+                if use_switch_columns:
+                    # Use IN/OUT broker, subfund, and asset columns directly from Switch Register (no RTA)
+                    processed_df['IN subfund code'] = processed_df[in_subfund_col].astype(str).str.strip()
+                    processed_df['out subfund code'] = processed_df[out_subfund_col].astype(str).str.strip()
+                    if si_asset_col:
+                        processed_df['IN ASSET_CLASS'] = processed_df[si_asset_col].fillna('Not Found').astype(str).str.strip()
+                    else:
+                        processed_df['IN ASSET_CLASS'] = 'Not Found'
+                    if so_asset_col:
+                        processed_df['out ASSET_CLASS'] = processed_df[so_asset_col].fillna('Not Found').astype(str).str.strip()
+                    else:
+                        processed_df['out ASSET_CLASS'] = 'Not Found'
+                else:
+                    # Process Switch Register: Extract scheme codes from "From" and "Scheme :" columns, then RTA
+                    # Function to extract scheme code (part before "/")
+                    def extract_scheme_code(value):
+                        if pd.isna(value):
+                            return None
+                        value_str = str(value)
+                        if '/' in value_str:
+                            scheme_code = value_str.split('/')[0].strip()
+                            return scheme_code
                         return None
-                    value_str = str(value)
-                    if '/' in value_str:
-                        scheme_code = value_str.split('/')[0].strip()
-                        return scheme_code
-                    return None
-                
-                # Find "From" column (case-insensitive)
-                from_col = None
-                for col in processed_df.columns:
-                    if str(col).upper().strip() == 'FROM':
-                        from_col = col
-                        break
-                
-                # Find "Scheme :" column (case-insensitive, handle variations)
-                scheme_col = None
-                for col in processed_df.columns:
-                    col_upper = str(col).upper().strip()
-                    if col_upper == 'SCHEME :' or col_upper == 'SCHEME:' or col_upper == 'SCHEME':
-                        scheme_col = col
-                        break
-                
-                # Process "From" column
-                if from_col:
-                    # Extract scheme code and add as "out Scheme Code" at the start
-                    out_scheme_codes = processed_df[from_col].apply(extract_scheme_code)
-                    processed_df.insert(0, 'out Scheme Code', out_scheme_codes)
                     
-                    # Rename "From" column to "switch out scheme"
-                    processed_df = processed_df.rename(columns={from_col: 'switch out scheme'})
-                else:
-                    # If "From" column not found, show warning but continue
-                    self.root.after(0, lambda: messagebox.showwarning(
-                        "Warning",
-                        "From column not found in Switch Register. Processing without out scheme code extraction."
-                    ))
-                    # Add empty column
-                    processed_df.insert(0, 'out Scheme Code', None)
-                
-                # Process "Scheme :" column
-                if scheme_col:
-                    # Extract scheme code and add as "IN Scheme Code" after "out Scheme Code"
-                    in_scheme_codes = processed_df[scheme_col].apply(extract_scheme_code)
-                    # Find position after "out Scheme Code"
-                    out_scheme_code_idx = list(processed_df.columns).index('out Scheme Code')
-                    processed_df.insert(out_scheme_code_idx + 1, 'IN Scheme Code', in_scheme_codes)
+                    # Find "From" column (case-insensitive)
+                    from_col = None
+                    for col in processed_df.columns:
+                        if str(col).upper().strip() == 'FROM':
+                            from_col = col
+                            break
                     
-                    # Rename "Scheme :" column to "switch in scheme"
-                    processed_df = processed_df.rename(columns={scheme_col: 'switch in scheme'})
-                else:
-                    # If "Scheme :" column not found, show warning but continue
-                    self.root.after(0, lambda: messagebox.showwarning(
-                        "Warning",
-                        "Scheme : column not found in Switch Register. Processing without IN scheme code extraction."
-                    ))
-                    # Add empty column after "out Scheme Code"
-                    out_scheme_code_idx = list(processed_df.columns).index('out Scheme Code')
-                    processed_df.insert(out_scheme_code_idx + 1, 'IN Scheme Code', None)
-                
-                loading_window.update_status("Matching scheme codes with RTA Master...")
-                
-                # Find Scheme_code, PARENT_SUB_FUND_CODE, and ASSET_CLASS columns in RTA Master
-                scheme_code_col = None
-                parent_sub_fund_code_col = None
-                asset_class_col = None
-                
-                for col in rta_df.columns:
-                    try:
+                    # Find "Scheme :" column (case-insensitive, handle variations)
+                    scheme_col = None
+                    for col in processed_df.columns:
                         col_upper = str(col).upper().strip()
-                        if col_upper == 'SCHEME_CODE' or col_upper == 'SCHEME CODE':
-                            scheme_code_col = col
-                        elif col_upper == 'PARENT_SUB_FUND_CODE' or col_upper == 'PARENT SUB FUND CODE':
-                            parent_sub_fund_code_col = col
-                        elif col_upper == 'ASSET_CLASS' or col_upper == 'ASSET CLASS' or ('ASSET' in col_upper and 'CLASS' in col_upper):
-                            asset_class_col = col
-                    except (TypeError, AttributeError):
-                        # Skip columns that can't be converted to string or checked
-                        continue
-                
-                if scheme_code_col and parent_sub_fund_code_col:
-                    # Normalize RTA Master columns for matching
-                    rta_df_normalized = rta_df.copy()
-                    rta_df_normalized[scheme_code_col] = rta_df_normalized[scheme_code_col].astype(str).str.strip()
-                    rta_df_normalized[parent_sub_fund_code_col] = rta_df_normalized[parent_sub_fund_code_col].astype(str).str.strip()
+                        if col_upper == 'SCHEME :' or col_upper == 'SCHEME:' or col_upper == 'SCHEME':
+                            scheme_col = col
+                            break
                     
-                    # Create mapping: Scheme_code -> PARENT_SUB_FUND_CODE
-                    subfund_mapping = rta_df_normalized.set_index(scheme_code_col)[parent_sub_fund_code_col].to_dict()
-                    
-                    # Create mapping: Scheme_code -> ASSET_CLASS (if column exists)
-                    asset_class_mapping = {}
-                    if asset_class_col:
-                        rta_df_normalized[asset_class_col] = rta_df_normalized[asset_class_col].astype(str).str.strip()
-                        asset_class_mapping = rta_df_normalized.set_index(scheme_code_col)[asset_class_col].to_dict()
-                    
-                    # Match "out Scheme Code" with Scheme_code and get PARENT_SUB_FUND_CODE
-                    if 'out Scheme Code' in processed_df.columns:
-                        processed_df['out Scheme Code'] = processed_df['out Scheme Code'].astype(str).str.strip()
-                        processed_df['out subfund code'] = processed_df['out Scheme Code'].map(subfund_mapping)
-                        processed_df['out subfund code'] = processed_df['out subfund code'].fillna('Not Found')
+                    # Process "From" column
+                    if from_col:
+                        # Extract scheme code and add as "out Scheme Code" at the start
+                        out_scheme_codes = processed_df[from_col].apply(extract_scheme_code)
+                        processed_df.insert(0, 'out Scheme Code', out_scheme_codes)
                         
-                        # Get ASSET_CLASS for "out Scheme Code"
-                        if asset_class_mapping:
-                            processed_df['out ASSET_CLASS'] = processed_df['out Scheme Code'].map(asset_class_mapping)
-                            processed_df['out ASSET_CLASS'] = processed_df['out ASSET_CLASS'].fillna('Not Found')
+                        # Rename "From" column to "switch out scheme"
+                        processed_df = processed_df.rename(columns={from_col: 'switch out scheme'})
+                    else:
+                        # If "From" column not found, show warning but continue
+                        self.root.after(0, lambda: messagebox.showwarning(
+                            "Warning",
+                            "From column not found in Switch Register. Processing without out scheme code extraction."
+                        ))
+                        # Add empty column
+                        processed_df.insert(0, 'out Scheme Code', None)
+                    
+                    # Process "Scheme :" column
+                    if scheme_col:
+                        # Extract scheme code and add as "IN Scheme Code" after "out Scheme Code"
+                        in_scheme_codes = processed_df[scheme_col].apply(extract_scheme_code)
+                        # Find position after "out Scheme Code"
+                        out_scheme_code_idx = list(processed_df.columns).index('out Scheme Code')
+                        processed_df.insert(out_scheme_code_idx + 1, 'IN Scheme Code', in_scheme_codes)
+                        
+                        # Rename "Scheme :" column to "switch in scheme"
+                        processed_df = processed_df.rename(columns={scheme_col: 'switch in scheme'})
+                    else:
+                        # If "Scheme :" column not found, show warning but continue
+                        self.root.after(0, lambda: messagebox.showwarning(
+                            "Warning",
+                            "Scheme : column not found in Switch Register. Processing without IN scheme code extraction."
+                        ))
+                        # Add empty column after "out Scheme Code"
+                        out_scheme_code_idx = list(processed_df.columns).index('out Scheme Code')
+                        processed_df.insert(out_scheme_code_idx + 1, 'IN Scheme Code', None)
+                    
+                    loading_window.update_status("Matching scheme codes with RTA Master...")
+                    
+                    # Find Scheme_code, PARENT_SUB_FUND_CODE, and ASSET_CLASS columns in RTA Master
+                    scheme_code_col = None
+                    parent_sub_fund_code_col = None
+                    asset_class_col = None
+                    
+                    for col in rta_df.columns:
+                        try:
+                            col_upper = str(col).upper().strip()
+                            if col_upper == 'SCHEME_CODE' or col_upper == 'SCHEME CODE':
+                                scheme_code_col = col
+                            elif col_upper == 'PARENT_SUB_FUND_CODE' or col_upper == 'PARENT SUB FUND CODE':
+                                parent_sub_fund_code_col = col
+                            elif col_upper == 'ASSET_CLASS' or col_upper == 'ASSET CLASS' or ('ASSET' in col_upper and 'CLASS' in col_upper):
+                                asset_class_col = col
+                        except (TypeError, AttributeError):
+                            # Skip columns that can't be converted to string or checked
+                            continue
+                    
+                    if scheme_code_col and parent_sub_fund_code_col:
+                        # Normalize RTA Master columns for matching
+                        rta_df_normalized = rta_df.copy()
+                        rta_df_normalized[scheme_code_col] = rta_df_normalized[scheme_code_col].astype(str).str.strip()
+                        rta_df_normalized[parent_sub_fund_code_col] = rta_df_normalized[parent_sub_fund_code_col].astype(str).str.strip()
+                        
+                        # Create mapping: Scheme_code -> PARENT_SUB_FUND_CODE
+                        subfund_mapping = rta_df_normalized.set_index(scheme_code_col)[parent_sub_fund_code_col].to_dict()
+                        
+                        # Create mapping: Scheme_code -> ASSET_CLASS (if column exists)
+                        asset_class_mapping = {}
+                        if asset_class_col:
+                            rta_df_normalized[asset_class_col] = rta_df_normalized[asset_class_col].astype(str).str.strip()
+                            asset_class_mapping = rta_df_normalized.set_index(scheme_code_col)[asset_class_col].to_dict()
+                        
+                        # Match "out Scheme Code" with Scheme_code and get PARENT_SUB_FUND_CODE
+                        if 'out Scheme Code' in processed_df.columns:
+                            processed_df['out Scheme Code'] = processed_df['out Scheme Code'].astype(str).str.strip()
+                            processed_df['out subfund code'] = processed_df['out Scheme Code'].map(subfund_mapping)
+                            processed_df['out subfund code'] = processed_df['out subfund code'].fillna('Not Found')
+                            
+                            # Get ASSET_CLASS for "out Scheme Code"
+                            if asset_class_mapping:
+                                processed_df['out ASSET_CLASS'] = processed_df['out Scheme Code'].map(asset_class_mapping)
+                                processed_df['out ASSET_CLASS'] = processed_df['out ASSET_CLASS'].fillna('Not Found')
+                            else:
+                                processed_df['out ASSET_CLASS'] = 'Not Found'
+                            
+                            # Insert "out subfund code" right after "out Scheme Code"
+                            cols = list(processed_df.columns)
+                            out_scheme_idx = cols.index('out Scheme Code')
+                            out_subfund = processed_df.pop('out subfund code')
+                            out_asset_class = processed_df.pop('out ASSET_CLASS')
+                            processed_df.insert(out_scheme_idx + 1, 'out subfund code', out_subfund)
+                            processed_df.insert(out_scheme_idx + 2, 'out ASSET_CLASS', out_asset_class)
                         else:
+                            processed_df['out subfund code'] = 'Not Found'
                             processed_df['out ASSET_CLASS'] = 'Not Found'
                         
-                        # Insert "out subfund code" right after "out Scheme Code"
-                        cols = list(processed_df.columns)
-                        out_scheme_idx = cols.index('out Scheme Code')
-                        # Remove from current position
-                        out_subfund = processed_df.pop('out subfund code')
-                        out_asset_class = processed_df.pop('out ASSET_CLASS')
-                        # Insert at correct position
-                        processed_df.insert(out_scheme_idx + 1, 'out subfund code', out_subfund)
-                        processed_df.insert(out_scheme_idx + 2, 'out ASSET_CLASS', out_asset_class)
+                        # Match "IN Scheme Code" with Scheme_code and get PARENT_SUB_FUND_CODE
+                        if 'IN Scheme Code' in processed_df.columns:
+                            processed_df['IN Scheme Code'] = processed_df['IN Scheme Code'].astype(str).str.strip()
+                            processed_df['IN subfund code'] = processed_df['IN Scheme Code'].map(subfund_mapping)
+                            processed_df['IN subfund code'] = processed_df['IN subfund code'].fillna('Not Found')
+                            
+                            if asset_class_mapping:
+                                processed_df['IN ASSET_CLASS'] = processed_df['IN Scheme Code'].map(asset_class_mapping)
+                                processed_df['IN ASSET_CLASS'] = processed_df['IN ASSET_CLASS'].fillna('Not Found')
+                            else:
+                                processed_df['IN ASSET_CLASS'] = 'Not Found'
+                            
+                            cols = list(processed_df.columns)
+                            in_scheme_idx = cols.index('IN Scheme Code')
+                            in_subfund = processed_df.pop('IN subfund code')
+                            in_asset_class = processed_df.pop('IN ASSET_CLASS')
+                            processed_df.insert(in_scheme_idx + 1, 'IN subfund code', in_subfund)
+                            processed_df.insert(in_scheme_idx + 2, 'IN ASSET_CLASS', in_asset_class)
+                        else:
+                            processed_df['IN subfund code'] = 'Not Found'
+                            processed_df['IN ASSET_CLASS'] = 'Not Found'
                     else:
+                        missing_cols = []
+                        if not scheme_code_col:
+                            missing_cols.append("Scheme_code")
+                        if not parent_sub_fund_code_col:
+                            missing_cols.append("PARENT_SUB_FUND_CODE")
+                        
+                        self.root.after(0, lambda: messagebox.showwarning(
+                            "Warning",
+                            f"Columns not found in RTA Master: {', '.join(missing_cols)}\n"
+                            f"Subfund codes and ASSET_CLASS will not be added."
+                        ))
                         processed_df['out subfund code'] = 'Not Found'
                         processed_df['out ASSET_CLASS'] = 'Not Found'
-                    
-                    # Match "IN Scheme Code" with Scheme_code and get PARENT_SUB_FUND_CODE
-                    if 'IN Scheme Code' in processed_df.columns:
-                        processed_df['IN Scheme Code'] = processed_df['IN Scheme Code'].astype(str).str.strip()
-                        processed_df['IN subfund code'] = processed_df['IN Scheme Code'].map(subfund_mapping)
-                        processed_df['IN subfund code'] = processed_df['IN subfund code'].fillna('Not Found')
-                        
-                        # Get ASSET_CLASS for "IN Scheme Code"
-                        if asset_class_mapping:
-                            processed_df['IN ASSET_CLASS'] = processed_df['IN Scheme Code'].map(asset_class_mapping)
-                            processed_df['IN ASSET_CLASS'] = processed_df['IN ASSET_CLASS'].fillna('Not Found')
-                        else:
-                            processed_df['IN ASSET_CLASS'] = 'Not Found'
-                        
-                        # Insert "IN subfund code" right after "IN Scheme Code"
-                        cols = list(processed_df.columns)
-                        in_scheme_idx = cols.index('IN Scheme Code')
-                        # Remove from current position
-                        in_subfund = processed_df.pop('IN subfund code')
-                        in_asset_class = processed_df.pop('IN ASSET_CLASS')
-                        # Insert at correct position
-                        processed_df.insert(in_scheme_idx + 1, 'IN subfund code', in_subfund)
-                        processed_df.insert(in_scheme_idx + 2, 'IN ASSET_CLASS', in_asset_class)
-                    else:
                         processed_df['IN subfund code'] = 'Not Found'
                         processed_df['IN ASSET_CLASS'] = 'Not Found'
-                else:
-                    # If columns not found, show warning but continue
-                    missing_cols = []
-                    if not scheme_code_col:
-                        missing_cols.append("Scheme_code")
-                    if not parent_sub_fund_code_col:
-                        missing_cols.append("PARENT_SUB_FUND_CODE")
-                    
-                    self.root.after(0, lambda: messagebox.showwarning(
-                        "Warning",
-                        f"Columns not found in RTA Master: {', '.join(missing_cols)}\n"
-                        f"Subfund codes and ASSET_CLASS will not be added."
-                    ))
-                    processed_df['out subfund code'] = 'Not Found'
-                    processed_df['out ASSET_CLASS'] = 'Not Found'
-                    processed_df['IN subfund code'] = 'Not Found'
-                    processed_df['IN ASSET_CLASS'] = 'Not Found'
                 
                 loading_window.update_status("Matching with Brokerage Structure...")
                 
@@ -653,7 +693,7 @@ class SwitchRegisterGUI:
                     print(f"Investment Period To Column: {investment_period_to_col}")
                     print(f"Trail Rate Columns: {trail_rate_cols}")
                     
-                    # Find broker column in Switch Register (flexible matching)
+                    # Find broker column in Switch Register (flexible matching); use IN/OUT broker when available
                     broker_col = None
                     for col in processed_df.columns:
                         col_upper = str(col).upper().strip()
@@ -663,15 +703,23 @@ class SwitchRegisterGUI:
                         elif col_upper == 'BROKER' or col_upper == 'BROKER CODE' or col_upper == 'BROKER_CODE':
                             broker_col = col
                             break
+                    if use_switch_columns:
+                        broker_col = in_broker_col  # for switch-in trail matching
+                        broker_col_out = out_broker_col  # for switch-out trail matching
+                    else:
+                        broker_col_out = broker_col
                     
                     print(f"Broker Column in Switch Register: {broker_col}")
                     print(f"Switch Register Columns: {list(processed_df.columns)}")
                     
-                    # Find transaction date column in Switch Register
+                    # Find transaction date column in Switch Register (prefer OUT_TRADE_ from Switch Register)
                     tran_date_col = None
                     for col in processed_df.columns:
                         col_upper = str(col).upper().strip()
-                        if 'TRAN' in col_upper and 'DATE' in col_upper:
+                        if col_upper in ('OUT_TRADE_', 'OUT_TRADE', 'OUT TRADE'):
+                            tran_date_col = col
+                            break
+                        elif 'TRAN' in col_upper and 'DATE' in col_upper:
                             tran_date_col = col
                             break
                         elif col_upper == 'TRANSACTION DATE' or col_upper == 'TRANSACTION_DATE':
@@ -726,6 +774,17 @@ class SwitchRegisterGUI:
                         else:
                             processed_df['_TRAN_DATE_DT'] = pd.NaT
                         
+                        # Build lookup: (broker, scheme) -> subset of brokerage for fast per-row access
+                        brokerage_lookup = {}
+                        for (b, s), grp in brokerage_normalized.groupby([cons_code_col, scheme_code_b_col], dropna=False):
+                            try:
+                                k = (str(b).strip().upper() if pd.notna(b) else '', str(s).strip().upper() if pd.notna(s) else '')
+                                if k[0] != '' and k[1] != '':
+                                    brokerage_lookup[k] = grp
+                            except (TypeError, AttributeError):
+                                pass
+                        empty_df = pd.DataFrame()
+                        
                         # DEBUG: Print sample values
                         print(f"\n=== DEBUG: Sample Brokerage Values ===")
                         if len(brokerage_normalized) > 0:
@@ -775,93 +834,54 @@ class SwitchRegisterGUI:
                                     except Exception:
                                         previous_month_date = None
                                 
-                                # DEBUG: Print first few attempts
-                                if match_count + no_match_count < 5:
+                                # DEBUG: Print first few attempts only (avoid I/O slowdown)
+                                if match_count + no_match_count < 2:
                                     print(f"\n=== DEBUG: Matching Attempt {match_count + no_match_count + 1} ===")
                                     print(f"Broker: '{broker_str}'")
                                     print(f"IN Subfund: '{in_subfund_str}'")
                                     print(f"Transaction Date: {tran_date}")
                                     print(f"Previous Month Date: {previous_month_date}")
                                 
-                                # Filter brokerage structure: match Cons Code with broker AND Scheme Code with IN subfund code
-                                mask = (
-                                    (brokerage_normalized[cons_code_col] == broker_str) &
-                                    (brokerage_normalized[scheme_code_b_col] == in_subfund_str)
-                                )
-                                matches = brokerage_normalized[mask]
+                                # Look up brokerage rows for this (broker, scheme) — O(1) instead of full scan
+                                matches = brokerage_lookup.get((broker_str, in_subfund_str), empty_df)
                                 
                                 if matches.empty:
                                     no_match_count += 1
-                                    if match_count + no_match_count <= 5:
-                                        # Check partial matches for debugging
-                                        broker_matches = brokerage_normalized[brokerage_normalized[cons_code_col] == broker_str]
-                                        scheme_matches = brokerage_normalized[brokerage_normalized[scheme_code_b_col] == in_subfund_str]
-                                        print(f"  No exact match found")
-                                        print(f"  Broker-only matches: {len(broker_matches)}")
-                                        print(f"  Scheme-only matches: {len(scheme_matches)}")
-                                        if len(broker_matches) > 0:
-                                            print(f"  Sample broker match Cons Codes: {broker_matches[cons_code_col].head(3).tolist()}")
-                                        if len(scheme_matches) > 0:
-                                            print(f"  Sample scheme match Scheme Codes: {scheme_matches[scheme_code_b_col].head(3).tolist()}")
+                                    if match_count + no_match_count <= 2:
+                                        print(f"  No match for (broker, IN subfund)")
                                     return ['Not Found'] * 4  # 1 current + 1 previous trail rate + 2 period columns
                                 
-                                # Filter by date range for CURRENT month (transaction date)
+                                # Vectorized date match: find row(s) where tran_date in [period_from, period_to]
                                 current_rate_match = None
                                 previous_rate_match = None
+                                pf = matches['_PERIOD_FROM_DT']
+                                pt = matches['_PERIOD_TO_DT']
+                                has_period = pf.notna() & pt.notna()
                                 
-                                if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col:
-                                    # Find match for CURRENT month (transaction date)
-                                    current_date_filtered = []
-                                    for idx, match_row in matches.iterrows():
-                                        period_from_dt = match_row.get('_PERIOD_FROM_DT')
-                                        period_to_dt = match_row.get('_PERIOD_TO_DT')
-                                        
-                                        # If both period dates are valid, check if transaction date is within range
-                                        if pd.notna(period_from_dt) and pd.notna(period_to_dt):
-                                            if period_from_dt <= tran_date <= period_to_dt:
-                                                current_date_filtered.append(idx)
-                                        # If period dates are missing, include the match (no date filtering)
-                                        elif pd.isna(period_from_dt) or pd.isna(period_to_dt):
-                                            current_date_filtered.append(idx)
+                                if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col and has_period.any():
+                                    # Current: first row where period contains tran_date
+                                    in_range_cur = (pf <= tran_date) & (tran_date <= pt)
+                                    if in_range_cur.any():
+                                        current_rate_match = matches.loc[in_range_cur].iloc[0]
+                                        if match_count + no_match_count < 2:
+                                            print(f"  ✓ Current month match found!")
                                     
-                                    if current_date_filtered:
-                                        current_rate_match = matches.loc[current_date_filtered[0]]
-                                        if match_count + no_match_count < 5:
-                                            print(f"  ✓ Current month match found! (Transaction date within period)")
-                                    
-                                    # Find match for PREVIOUS month
-                                    if previous_month_date and pd.notna(previous_month_date):
-                                        previous_date_filtered = []
-                                        for idx, match_row in matches.iterrows():
-                                            period_from_dt = match_row.get('_PERIOD_FROM_DT')
-                                            period_to_dt = match_row.get('_PERIOD_TO_DT')
-                                            
-                                            # If both period dates are valid, check if previous month date is within range
-                                            if pd.notna(period_from_dt) and pd.notna(period_to_dt):
-                                                if period_from_dt <= previous_month_date <= period_to_dt:
-                                                    previous_date_filtered.append(idx)
-                                            # If period dates are missing, skip (we need period dates for previous month)
-                                        
-                                        if previous_date_filtered:
-                                            previous_rate_match = matches.loc[previous_date_filtered[0]]
-                                            if match_count + no_match_count < 5:
-                                                print(f"  ✓ Previous month match found! (Previous month date within period)")
-                                        else:
-                                            if match_count + no_match_count < 5:
-                                                print(f"  ✗ No previous month match found (Previous month date: {previous_month_date})")
+                                    # Previous month (same year): first row where period contains previous_month_date
+                                    if previous_month_date and pd.notna(previous_month_date) and previous_month_date.year == tran_date.year:
+                                        in_range_prev = (pf <= previous_month_date) & (previous_month_date <= pt)
+                                        if in_range_prev.any():
+                                            previous_rate_match = matches.loc[in_range_prev].iloc[0]
+                                            if match_count + no_match_count < 2:
+                                                print(f"  ✓ Previous month match found! (same year)")
                                 else:
                                     # No date filtering - use first match for current only
                                     if not matches.empty:
-                                        first_match = matches.iloc[0]
-                                        current_rate_match = first_match
-                                        if match_count + no_match_count < 5:
-                                            if pd.isna(tran_date):
-                                                print(f"  ⚠ No transaction date - using first match without date filtering")
-                                            else:
-                                                print(f"  ⚠ No period dates in brokerage - using first match without date filtering")
+                                        current_rate_match = matches.iloc[0]
+                                        if match_count + no_match_count < 2:
+                                            print(f"  ⚠ Using first match (no date filter)")
                                 
                                 match_count += 1
-                                if match_count <= 5:
+                                if match_count <= 2:
                                     print(f"  ✓ Match found!")
                                 
                                 results = []
@@ -917,7 +937,7 @@ class SwitchRegisterGUI:
                                 return results
                             except Exception as e:
                                 no_match_count += 1
-                                if match_count + no_match_count <= 5:
+                                if match_count + no_match_count <= 2:
                                     print(f"  Exception: {str(e)}")
                                 return ['Not Found'] * 4
                         
@@ -948,8 +968,8 @@ class SwitchRegisterGUI:
                         def get_trail_rates_out(row):
                             nonlocal match_count_out, no_match_count_out
                             try:
-                                # Get broker code
-                                broker = row.get(broker_col) if broker_col in row.index else None
+                                # Get broker code (OUT broker when use_switch_columns)
+                                broker = row.get(broker_col_out) if broker_col_out in row.index else None
                                 if pd.isna(broker) or broker == '':
                                     no_match_count_out += 1
                                     return ['Not Found']  # 1 trail rate only
@@ -980,59 +1000,31 @@ class SwitchRegisterGUI:
                                     except Exception:
                                         previous_month_date = None
                                 
-                                # Filter brokerage structure: match Cons Code with broker AND Scheme Code with OUT subfund code
-                                mask = (
-                                    (brokerage_normalized[cons_code_col] == broker_str) &
-                                    (brokerage_normalized[scheme_code_b_col] == out_subfund_str)
-                                )
-                                matches = brokerage_normalized[mask]
+                                # Look up brokerage rows for this (broker, scheme) — O(1) instead of full scan
+                                matches = brokerage_lookup.get((broker_str, out_subfund_str), empty_df)
                                 
                                 if matches.empty:
                                     no_match_count_out += 1
                                     return ['Not Found', 'Not Found']  # Current + Previous
                                 
-                                # Filter by date range for CURRENT and PREVIOUS month
                                 current_rate_match = None
                                 previous_rate_match = None
+                                # Vectorized date match (same as IN)
+                                pf = matches['_PERIOD_FROM_DT']
+                                pt = matches['_PERIOD_TO_DT']
+                                has_period = pf.notna() & pt.notna()
                                 
-                                if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col:
-                                    # Find match for CURRENT month (transaction date)
-                                    current_date_filtered = []
-                                    for idx, match_row in matches.iterrows():
-                                        period_from_dt = match_row.get('_PERIOD_FROM_DT')
-                                        period_to_dt = match_row.get('_PERIOD_TO_DT')
-                                        
-                                        # If both period dates are valid, check if transaction date is within range
-                                        if pd.notna(period_from_dt) and pd.notna(period_to_dt):
-                                            if period_from_dt <= tran_date <= period_to_dt:
-                                                current_date_filtered.append(idx)
-                                        # If period dates are missing, include the match (no date filtering)
-                                        elif pd.isna(period_from_dt) or pd.isna(period_to_dt):
-                                            current_date_filtered.append(idx)
-                                    
-                                    if current_date_filtered:
-                                        current_rate_match = matches.loc[current_date_filtered[0]]
-                                    
-                                    # Find match for PREVIOUS month
-                                    if previous_month_date and pd.notna(previous_month_date):
-                                        previous_date_filtered = []
-                                        for idx, match_row in matches.iterrows():
-                                            period_from_dt = match_row.get('_PERIOD_FROM_DT')
-                                            period_to_dt = match_row.get('_PERIOD_TO_DT')
-                                            
-                                            # If both period dates are valid, check if previous month date is within range
-                                            if pd.notna(period_from_dt) and pd.notna(period_to_dt):
-                                                if period_from_dt <= previous_month_date <= period_to_dt:
-                                                    previous_date_filtered.append(idx)
-                                            # If period dates are missing, skip (we need period dates for previous month)
-                                        
-                                        if previous_date_filtered:
-                                            previous_rate_match = matches.loc[previous_date_filtered[0]]
+                                if pd.notna(tran_date) and investment_period_from_col and investment_period_to_col and has_period.any():
+                                    in_range_cur = (pf <= tran_date) & (tran_date <= pt)
+                                    if in_range_cur.any():
+                                        current_rate_match = matches.loc[in_range_cur].iloc[0]
+                                    if previous_month_date and pd.notna(previous_month_date) and previous_month_date.year == tran_date.year:
+                                        in_range_prev = (pf <= previous_month_date) & (previous_month_date <= pt)
+                                        if in_range_prev.any():
+                                            previous_rate_match = matches.loc[in_range_prev].iloc[0]
                                 else:
-                                    # No date filtering - use first match for current only
                                     if not matches.empty:
-                                        first_match = matches.iloc[0]
-                                        current_rate_match = first_match
+                                        current_rate_match = matches.iloc[0]
                                 
                                 match_count_out += 1
                                 
@@ -1376,16 +1368,19 @@ class SwitchRegisterGUI:
                 # Remove rows where broker is "DIRECT"
                 loading_window.update_status("Filtering out DIRECT broker entries...")
                 
-                # Find broker column (it should already be found, but check again to be safe)
+                # Find broker column for DIRECT filter (use OUT_BROKER when we have IN/OUT columns)
                 broker_col_filter = None
-                for col in processed_df.columns:
-                    col_upper = str(col).upper().strip()
-                    if 'BROK' in col_upper and ('DLR' in col_upper or 'DEALER' in col_upper):
-                        broker_col_filter = col
-                        break
-                    elif col_upper == 'BROKER' or col_upper == 'BROKER CODE' or col_upper == 'BROKER_CODE':
-                        broker_col_filter = col
-                        break
+                if use_switch_columns and out_broker_col and out_broker_col in processed_df.columns:
+                    broker_col_filter = out_broker_col
+                else:
+                    for col in processed_df.columns:
+                        col_upper = str(col).upper().strip()
+                        if 'BROK' in col_upper and ('DLR' in col_upper or 'DEALER' in col_upper):
+                            broker_col_filter = col
+                            break
+                        elif col_upper == 'BROKER' or col_upper == 'BROKER CODE' or col_upper == 'BROKER_CODE':
+                            broker_col_filter = col
+                            break
                 
                 if broker_col_filter and broker_col_filter in processed_df.columns:
                     initial_count = len(processed_df)
